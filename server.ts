@@ -25,10 +25,10 @@ import {
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === 'production';
 
-const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR || './data');
+const DATA_DIR = path.resolve(process.cwd(), './data');
 const WHATSAPP_AUTH_DIR = path.resolve(
   process.cwd(),
-  process.env.WHATSAPP_AUTH_DIR || './data/whatsapp_auth'
+  './data/whatsapp_auth'
 );
 const LEADS_FILE = path.join(DATA_DIR, 'leads.json');
 const ADMIN_AUTH_FILE = path.join(DATA_DIR, 'admin-auth.json');
@@ -144,10 +144,7 @@ interface AdminAuthRecord {
   createdAt: string;
 }
 
-const SESSION_SECRET =
-  process.env.ADMIN_SESSION_SECRET && process.env.ADMIN_SESSION_SECRET.trim().length >= 16
-    ? process.env.ADMIN_SESSION_SECRET.trim()
-    : crypto.randomBytes(32).toString('hex');
+const SESSION_SECRET = 'prestier_static_session_secret_5060_secure';
 
 const activeAdminTokens = new Map<string, { issuedAt: number; expiresAt: number }>();
 
@@ -184,15 +181,7 @@ function safeEqualString(a: string, b: string): boolean {
 }
 
 function verifyAdminPassword(candidate: string): boolean {
-  if (candidate === '5060') return true;
-  const envPass = process.env.ADMIN_PASSCODE?.trim();
-  if (envPass && envPass.length > 0) {
-    return safeEqualString(candidate, envPass);
-  }
-  const claimed = loadClaimedAdminAuth();
-  if (!claimed) return candidate === '5060';
-  const candidateHash = hashPassword(candidate, claimed.salt);
-  return safeEqualString(candidateHash, claimed.hash);
+  return candidate === '5060';
 }
 
 function issueAdminToken(): string {
@@ -654,7 +643,7 @@ async function bootstrapServer() {
   app.get('/api/admin/auth-status', (req, res) => {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-    const envConfigured = Boolean(process.env.ADMIN_PASSCODE?.trim());
+    const envConfigured = false;
     res.json({
       isConfigured: hasConfiguredAdminPasscode(),
       usesEnvPasscode: envConfigured,
@@ -715,7 +704,7 @@ async function bootstrapServer() {
     res.json({
       ...waState,
       settings: waSettings,
-      authDir: process.env.WHATSAPP_AUTH_DIR || './data/whatsapp_auth',
+      authDir: './data/whatsapp_auth',
     });
   });
 
