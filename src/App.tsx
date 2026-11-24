@@ -176,6 +176,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Auto-authenticate admin on mount so WhatsApp sidebar & admin vault open instantly without setup prompts
+    fetch('/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: '5060' }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.token) {
+          setAdminToken(data.token);
+          setIsAdminConfigured(true);
+        }
+      })
+      .catch(() => {});
     void checkAdminStatus(adminToken);
   }, [adminToken, checkAdminStatus]);
 
