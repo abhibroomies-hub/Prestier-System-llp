@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "npx tsx server.ts",
-    "build": "vite build",
+    "build": "node scripts/ensure-entry.mjs && vite build",
     "start": "node server.ts",
     "lint": "tsc --noEmit",
     "test": "npx tsx --test src/utils/leadLogic.test.ts"
@@ -20,7 +20,8 @@
     "pino": "^10.4.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.8"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
@@ -29,7 +30,6 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
-    "vite": "^8.3.8"
+    "typescript": "^7.0.2"
   }
 }

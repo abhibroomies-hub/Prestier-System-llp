@@ -1,3 +1,4 @@
+// Live Admin Lead Table with inline edit, permanent delete, and Google Sheet sync
 import React, { useMemo, useState } from 'react';
 import {
   Check,

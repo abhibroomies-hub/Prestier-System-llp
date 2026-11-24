@@ -1,3 +1,4 @@
+// Admin Google Sheet Apps Script webhook setup and full-sync panel
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Check,

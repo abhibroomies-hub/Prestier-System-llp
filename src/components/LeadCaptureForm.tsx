@@ -1,3 +1,4 @@
+// Real-time partial and confirmed lead capture form component
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
