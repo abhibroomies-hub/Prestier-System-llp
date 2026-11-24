@@ -61,6 +61,7 @@ const DELETED_LEADS_FILE = path.join(DATA_DIR, 'deleted-leads.json');
 const ADMIN_AUTH_FILE = path.join(DATA_DIR, 'admin-auth.json');
 const ADMIN_SESSIONS_FILE = path.join(DATA_DIR, 'admin-sessions.json');
 const WA_SETTINGS_FILE = path.join(DATA_DIR, 'whatsapp-settings.json');
+const WA_REPLY_IMAGE_FILE = path.join(DATA_DIR, 'whatsapp-reply-image.json');
 const SHEET_SYNC_FILE = path.join(DATA_DIR, 'sheet-sync-settings.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -289,6 +290,114 @@ let waSettings: WhatsAppSettings = (() => {
 
 function persistWaSettingsLocal(): void {
   writeJsonFileSafe(WA_SETTINGS_FILE, waSettings);
+}
+
+type WaReplyImageMode = 'default' | 'custom' | 'none';
+
+interface WhatsAppReplyImageState {
+  mode: WaReplyImageMode;
+  mimeType: string;
+  base64Data: string;
+  updatedAt: number;
+}
+
+const MAX_REPLY_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB
+
+function validateImageBinaryMagic(mimeType: string, buf: Buffer): boolean {
+  if (buf.length < 32 || buf.length > MAX_REPLY_IMAGE_BYTES) return false;
+  if (mimeType === 'image/jpeg') {
+    return buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  }
+  if (mimeType === 'image/png') {
+    return (
+      buf[0] === 0x89 &&
+      buf[1] === 0x50 &&
+      buf[2] === 0x4e &&
+      buf[3] === 0x47
+    );
+  }
+  if (mimeType === 'image/webp') {
+    return (
+      buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      buf.subarray(8, 12).toString('ascii') === 'WEBP'
+    );
+  }
+  return false;
+}
+
+function parseAndValidateReplyImageDataUrl(
+  rawDataUrl: string
+):
+  | { valid: true; mimeType: string; base64Data: string }
+  | { valid: false; error: string } {
+  const trimmed = rawDataUrl.trim();
+  const match = trimmed.match(
+    /^data:(image\/jpeg|image\/png|image\/webp);base64,([A-Za-z0-9+/=\s]+)$/
+  );
+  if (!match) {
+    return {
+      valid: false,
+      error: 'Only JPG, PNG, or WebP images are supported.',
+    };
+  }
+  const mimeType = match[1];
+  const cleanBase64 = match[2].replace(/\s+/g, '');
+  const buf = Buffer.from(cleanBase64, 'base64');
+  if (buf.length > MAX_REPLY_IMAGE_BYTES) {
+    return {
+      valid: false,
+      error: 'Image size must be under 2 MB.',
+    };
+  }
+  if (!validateImageBinaryMagic(mimeType, buf)) {
+    return {
+      valid: false,
+      error: 'Invalid or corrupted image file.',
+    };
+  }
+  return { valid: true, mimeType, base64Data: cleanBase64 };
+}
+
+let waReplyImage: WhatsAppReplyImageState = (() => {
+  const raw = readJsonFileSafe<Partial<WhatsAppReplyImageState>>(WA_REPLY_IMAGE_FILE, {});
+  const mode: WaReplyImageMode =
+    raw.mode === 'custom' || raw.mode === 'none' ? raw.mode : 'default';
+  if (
+    mode === 'custom' &&
+    typeof raw.mimeType === 'string' &&
+    typeof raw.base64Data === 'string'
+  ) {
+    const buf = Buffer.from(raw.base64Data, 'base64');
+    if (validateImageBinaryMagic(raw.mimeType, buf)) {
+      return {
+        mode: 'custom',
+        mimeType: raw.mimeType,
+        base64Data: raw.base64Data,
+        updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 1,
+      };
+    }
+  }
+  return {
+    mode: mode === 'none' ? 'none' : 'default',
+    mimeType: '',
+    base64Data: '',
+    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+  };
+})();
+
+function persistWaReplyImageLocal(): void {
+  writeJsonFileSafe(WA_REPLY_IMAGE_FILE, waReplyImage);
+}
+
+function getReplyImageStatusPayload() {
+  return {
+    mode: waReplyImage.mode,
+    customDataUrl:
+      waReplyImage.mode === 'custom' && waReplyImage.mimeType && waReplyImage.base64Data
+        ? `data:${waReplyImage.mimeType};base64,${waReplyImage.base64Data}`
+        : null,
+    updatedAt: waReplyImage.updatedAt,
+  };
 }
 
 // 5. Google Sheet Apps Script Settings
@@ -738,6 +847,15 @@ async function pushWaSettingsToRtdb(): Promise<void> {
   }
 }
 
+async function pushWaReplyImageToRtdb(): Promise<void> {
+  if (!rtdbInstance) return;
+  try {
+    await set(ref(rtdbInstance, 'meta/waReplyImage'), waReplyImage);
+  } catch {
+    // ignore
+  }
+}
+
 async function pushSheetSyncMetaToRtdb(): Promise<void> {
   if (!rtdbInstance) return;
   try {
@@ -1047,6 +1165,46 @@ function initServerRealtimeDbSync(): void {
       }
     });
 
+    // 5b. Sync WhatsApp Attached Reply Image across all deployments
+    onValue(ref(rtdbInstance, 'meta/waReplyImage'), (snap) => {
+      const val = snap.val() as Partial<WhatsAppReplyImageState> | null;
+      if (val && typeof val === 'object') {
+        const remoteUpdatedAt = typeof val.updatedAt === 'number' ? val.updatedAt : 1;
+        if (remoteUpdatedAt > waReplyImage.updatedAt) {
+          const remoteMode: WaReplyImageMode =
+            val.mode === 'custom' || val.mode === 'none' ? val.mode : 'default';
+          if (
+            remoteMode === 'custom' &&
+            typeof val.mimeType === 'string' &&
+            typeof val.base64Data === 'string'
+          ) {
+            const buf = Buffer.from(val.base64Data, 'base64');
+            if (validateImageBinaryMagic(val.mimeType, buf)) {
+              waReplyImage = {
+                mode: 'custom',
+                mimeType: val.mimeType,
+                base64Data: val.base64Data,
+                updatedAt: remoteUpdatedAt,
+              };
+              persistWaReplyImageLocal();
+            }
+          } else {
+            waReplyImage = {
+              mode: remoteMode === 'none' ? 'none' : 'default',
+              mimeType: '',
+              base64Data: '',
+              updatedAt: remoteUpdatedAt,
+            };
+            persistWaReplyImageLocal();
+          }
+        } else if (waReplyImage.updatedAt > remoteUpdatedAt) {
+          void pushWaReplyImageToRtdb();
+        }
+      } else if (waReplyImage.updatedAt > 0) {
+        void pushWaReplyImageToRtdb();
+      }
+    });
+
     // 6. Sync Google Sheet Apps Script Configuration across all deployments
     onValue(ref(rtdbInstance, 'meta/sheetSync'), (snap) => {
       const val = snap.val() as Partial<SheetSyncSettings> | null;
@@ -1248,6 +1406,19 @@ let isShuttingDown = false;
 const inFlightLeadWaDispatches = new Set<string>();
 
 function resolveSinglePrestairReplyImageBuffer(): Buffer | null {
+  if (waReplyImage.mode === 'none') {
+    return null;
+  }
+  if (waReplyImage.mode === 'custom' && waReplyImage.base64Data) {
+    try {
+      const customBuf = Buffer.from(waReplyImage.base64Data, 'base64');
+      if (validateImageBinaryMagic(waReplyImage.mimeType, customBuf)) {
+        return customBuf;
+      }
+    } catch {
+      // fallback to default image if decoding fails
+    }
+  }
   const relPath = PRESTAIR_REPLY_IMAGES[0].replace(/^\/+/, '');
   const candidates = [
     path.resolve(process.cwd(), 'public', relPath),
@@ -1623,7 +1794,7 @@ async function startServer(): Promise<void> {
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '4mb' }));
 
   // --------------------------------------------------------------------------
   // Health Check (Railway / Cloud Run / AI Studio)
@@ -2259,6 +2430,7 @@ async function startServer(): Promise<void> {
         messageTemplate: waSettings.messageTemplate,
         adminNotifyPhone: waSettings.adminNotifyPhone,
       },
+      replyImage: getReplyImageStatusPayload(),
     });
   });
 
@@ -2324,6 +2496,51 @@ async function startServer(): Promise<void> {
     await pushWaSettingsToRtdb();
     res.json({ ok: true, settings: waSettings });
   });
+
+  app.post(
+    '/api/whatsapp/reply-image',
+    requireAdminAuth,
+    async (req: Request, res: Response) => {
+      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+        string,
+        unknown
+      >;
+      const rawMode = body.mode;
+      if (rawMode !== 'default' && rawMode !== 'custom' && rawMode !== 'none') {
+        res.status(400).json({ error: 'Invalid image mode.' });
+        return;
+      }
+
+      if (rawMode === 'custom') {
+        const rawDataUrl = typeof body.dataUrl === 'string' ? body.dataUrl : '';
+        const validated = parseAndValidateReplyImageDataUrl(rawDataUrl);
+        if (!validated.valid) {
+          res.status(400).json({ error: validated.error });
+          return;
+        }
+        waReplyImage = {
+          mode: 'custom',
+          mimeType: validated.mimeType,
+          base64Data: validated.base64Data,
+          updatedAt: Date.now(),
+        };
+      } else {
+        waReplyImage = {
+          mode: rawMode,
+          mimeType: '',
+          base64Data: '',
+          updatedAt: Date.now(),
+        };
+      }
+
+      persistWaReplyImageLocal();
+      await pushWaReplyImageToRtdb();
+      res.json({
+        ok: true,
+        replyImage: getReplyImageStatusPayload(),
+      });
+    }
+  );
 
   app.post(
     '/api/whatsapp/test-message',

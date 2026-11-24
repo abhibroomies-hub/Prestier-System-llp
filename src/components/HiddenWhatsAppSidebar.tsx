@@ -1,16 +1,25 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
+  Check,
+  ImagePlus,
   Loader2,
   MessageCircle,
+  Pencil,
   RefreshCw,
   RotateCcw,
+  RotateCw,
   Send,
+  Trash2,
   Unlink,
+  X,
 } from 'lucide-react';
 import {
   DEFAULT_PRESTAIR_WHATSAPP_REPLY,
   PRESTAIR_REPLY_IMAGES,
 } from '../utils/leadLogic';
+
+type ReplyImageMode = 'default' | 'custom' | 'none';
+type AspectPreset = 'original' | '16:10' | '4:3' | '1:1';
 
 interface WhatsAppStatusPayload {
   status: 'disconnected' | 'connecting' | 'qr_ready' | 'pairing_ready' | 'connected';
@@ -25,6 +34,72 @@ interface WhatsAppStatusPayload {
     messageTemplate: string;
     adminNotifyPhone: string;
   };
+  replyImage?: {
+    mode: ReplyImageMode;
+    customDataUrl: string | null;
+    updatedAt: number;
+  };
+}
+
+function drawEditedImageToCanvas(
+  canvas: HTMLCanvasElement,
+  img: HTMLImageElement,
+  options: {
+    rotationDeg: number;
+    aspectPreset: AspectPreset;
+    zoomLevel: number;
+    brightnessPct: number;
+    maxDimension: number;
+  }
+): void {
+  const normalizedRot = ((options.rotationDeg % 360) + 360) % 360;
+  const isQuarterTurn = normalizedRot === 90 || normalizedRot === 270;
+  const rotatedWidth = isQuarterTurn ? img.naturalHeight : img.naturalWidth;
+  const rotatedHeight = isQuarterTurn ? img.naturalWidth : img.naturalHeight;
+
+  let targetRatio = rotatedWidth / Math.max(1, rotatedHeight);
+  if (options.aspectPreset === '16:10') targetRatio = 16 / 10;
+  else if (options.aspectPreset === '4:3') targetRatio = 4 / 3;
+  else if (options.aspectPreset === '1:1') targetRatio = 1;
+
+  let outWidth = rotatedWidth;
+  let outHeight = rotatedHeight;
+  if (outWidth / outHeight > targetRatio) {
+    outWidth = Math.round(outHeight * targetRatio);
+  } else {
+    outHeight = Math.round(outWidth / targetRatio);
+  }
+
+  const maxSide = Math.max(outWidth, outHeight);
+  if (maxSide > options.maxDimension) {
+    const scaleDown = options.maxDimension / maxSide;
+    outWidth = Math.max(64, Math.round(outWidth * scaleDown));
+    outHeight = Math.max(64, Math.round(outHeight * scaleDown));
+  }
+
+  canvas.width = outWidth;
+  canvas.height = outHeight;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.save();
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, outWidth, outHeight);
+  ctx.filter = `brightness(${options.brightnessPct}%)`;
+
+  ctx.translate(outWidth / 2, outHeight / 2);
+  ctx.rotate((normalizedRot * Math.PI) / 180);
+
+  const coverScale = Math.max(
+    outWidth / Math.max(1, rotatedWidth),
+    outHeight / Math.max(1, rotatedHeight)
+  );
+  const finalScale = coverScale * options.zoomLevel;
+
+  ctx.scale(finalScale, finalScale);
+  ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+  ctx.restore();
 }
 
 interface HiddenWhatsAppSidebarProps {
@@ -46,6 +121,30 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({ ad
   const [showUnlinkConfirm, setShowUnlinkConfirm] = useState(false);
   const [isEditingSettings, setIsEditingSettings] = useState(false);
 
+  // Editable & Changeable Attached WhatsApp Image State
+  const [replyImageMode, setReplyImageMode] = useState<ReplyImageMode>('default');
+  const [customReplyImageUrl, setCustomReplyImageUrl] = useState<string | null>(null);
+  const [isSavingImage, setIsSavingImage] = useState(false);
+  const [imageFeedback, setImageFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  const [isEditingImage, setIsEditingImage] = useState(false);
+  const [rotationDeg, setRotationDeg] = useState(0);
+  const [aspectPreset, setAspectPreset] = useState<AspectPreset>('16:10');
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [brightnessPct, setBrightnessPct] = useState(100);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const loadedEditorImgRef = useRef<HTMLImageElement | null>(null);
+
+  const activeDisplayImageSrc =
+    replyImageMode === 'custom' && customReplyImageUrl
+      ? customReplyImageUrl
+      : PRESTAIR_REPLY_IMAGES[0];
+
   const fetchWhatsAppStatus = async (syncFormFields = false) => {
     try {
       const res = await fetch('/api/whatsapp/status', {
@@ -60,6 +159,10 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({ ad
         setMessageTemplate(data.settings.messageTemplate || DEFAULT_PRESTAIR_WHATSAPP_REPLY);
         setAdminNotifyPhone(data.settings.adminNotifyPhone || '');
       }
+      if (!isEditingImage && data.replyImage) {
+        setReplyImageMode(data.replyImage.mode);
+        setCustomReplyImageUrl(data.replyImage.customDataUrl);
+      }
     } catch {
       // ignore transient network error
     }
@@ -72,7 +175,152 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({ ad
       void fetchWhatsAppStatus(false);
     }, 3500);
     return () => clearInterval(interval);
-  }, [adminToken, isEditingSettings]);
+  }, [adminToken, isEditingSettings, isEditingImage]);
+
+  useEffect(() => {
+    if (!isEditingImage || !previewCanvasRef.current || !loadedEditorImgRef.current) return;
+    drawEditedImageToCanvas(previewCanvasRef.current, loadedEditorImgRef.current, {
+      rotationDeg,
+      aspectPreset,
+      zoomLevel,
+      brightnessPct,
+      maxDimension: 960,
+    });
+  }, [isEditingImage, rotationDeg, aspectPreset, zoomLevel, brightnessPct]);
+
+  const saveReplyImagePayload = async (
+    mode: ReplyImageMode,
+    dataUrl?: string,
+    successNote?: string
+  ) => {
+    setIsSavingImage(true);
+    setImageFeedback(null);
+    try {
+      const res = await fetch('/api/whatsapp/reply-image', {
+        method: 'POST',
+        headers: {
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ mode, ...(dataUrl ? { dataUrl } : {}) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setImageFeedback({
+          type: 'error',
+          text: data.error || 'Could not update WhatsApp image.',
+        });
+        return false;
+      }
+      if (data.replyImage) {
+        setReplyImageMode(data.replyImage.mode);
+        setCustomReplyImageUrl(data.replyImage.customDataUrl);
+      }
+      setImageFeedback({
+        type: 'success',
+        text:
+          successNote ||
+          'WhatsApp attachment image updated and synced in real time across all servers.',
+      });
+      return true;
+    } catch {
+      setImageFeedback({
+        type: 'error',
+        text: 'Network error while saving WhatsApp image.',
+      });
+      return false;
+    } finally {
+      setIsSavingImage(false);
+    }
+  };
+
+  const handleUploadNewImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setImageFeedback({
+        type: 'error',
+        text: 'Please choose a JPG, PNG, or WebP image file.',
+      });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawSrc = typeof reader.result === 'string' ? reader.result : '';
+      if (!rawSrc) return;
+      const img = new Image();
+      img.onload = () => {
+        const offscreen = document.createElement('canvas');
+        drawEditedImageToCanvas(offscreen, img, {
+          rotationDeg: 0,
+          aspectPreset: 'original',
+          zoomLevel: 1,
+          brightnessPct: 100,
+          maxDimension: 1280,
+        });
+        const optimizedDataUrl = offscreen.toDataURL('image/jpeg', 0.88);
+        void saveReplyImagePayload(
+          'custom',
+          optimizedDataUrl,
+          'New WhatsApp image uploaded & synced across AI Studio and Railway.'
+        );
+      };
+      img.onerror = () => {
+        setImageFeedback({
+          type: 'error',
+          text: 'Unable to read that image file. Please try another JPG or PNG.',
+        });
+      };
+      img.src = rawSrc;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleOpenImageEditor = () => {
+    setImageFeedback(null);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      loadedEditorImgRef.current = img;
+      setRotationDeg(0);
+      setAspectPreset('16:10');
+      setZoomLevel(1);
+      setBrightnessPct(100);
+      setIsEditingImage(true);
+    };
+    img.onerror = () => {
+      setImageFeedback({
+        type: 'error',
+        text: 'Could not load image into editor. Try uploading a new image first.',
+      });
+    };
+    img.src = activeDisplayImageSrc;
+  };
+
+  const handleApplyEditedImage = async () => {
+    const img = loadedEditorImgRef.current;
+    if (!img) return;
+    const exportCanvas = document.createElement('canvas');
+    drawEditedImageToCanvas(exportCanvas, img, {
+      rotationDeg,
+      aspectPreset,
+      zoomLevel,
+      brightnessPct,
+      maxDimension: 1280,
+    });
+    const editedDataUrl = exportCanvas.toDataURL('image/jpeg', 0.88);
+    const ok = await saveReplyImagePayload(
+      'custom',
+      editedDataUrl,
+      'Edited WhatsApp image saved & synced in real time.'
+    );
+    if (ok) {
+      setIsEditingImage(false);
+    }
+  };
 
   const handleStartWhatsApp = async (usePairingPhone = false) => {
     setIsLoadingWa(true);
@@ -384,25 +632,242 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({ ad
             </label>
           </div>
 
-          <div>
-            <p className="text-xs font-semibold text-slate-700 mb-2">
-              Attached WhatsApp Image (1 Image Sent Automatically with Message)
-            </p>
-            <div className="max-w-sm">
-              {PRESTAIR_REPLY_IMAGES.map((src) => (
-                <div
-                  key={src}
-                  className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50 aspect-[16/10]"
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-700">
+                {replyImageMode === 'none'
+                  ? 'Attached WhatsApp Image (Disabled · Text-Only Reply)'
+                  : 'Attached WhatsApp Image (1 Image Sent Automatically with Message)'}
+              </p>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleUploadNewImage}
+                className="hidden"
+              />
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={isSavingImage}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
                 >
-                  <img
-                    src={src}
-                    alt="Prestair WhatsApp Attachment"
-                    referrerPolicy="no-referrer"
-                    className="h-full w-full object-cover"
+                  <ImagePlus className="h-3.5 w-3.5 text-sky-700" />
+                  <span>Change Image</span>
+                </button>
+
+                {replyImageMode !== 'none' && !isEditingImage && (
+                  <button
+                    type="button"
+                    disabled={isSavingImage}
+                    onClick={handleOpenImageEditor}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Pencil className="h-3.5 w-3.5 text-emerald-700" />
+                    <span>Edit Image</span>
+                  </button>
+                )}
+
+                {replyImageMode !== 'default' && !isEditingImage && (
+                  <button
+                    type="button"
+                    disabled={isSavingImage}
+                    onClick={() =>
+                      void saveReplyImagePayload(
+                        'default',
+                        undefined,
+                        'Restored default Prestair WhatsApp image.'
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-sky-700 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    <span>Default</span>
+                  </button>
+                )}
+
+                {replyImageMode !== 'none' && !isEditingImage && (
+                  <button
+                    type="button"
+                    disabled={isSavingImage}
+                    onClick={() =>
+                      void saveReplyImagePayload(
+                        'none',
+                        undefined,
+                        'Removed attached image (WhatsApp replies will send text only).'
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 disabled:opacity-50 text-slate-600 hover:text-rose-700 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>No Image</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {!isEditingImage ? (
+              <div className="max-w-sm">
+                {replyImageMode !== 'none' ? (
+                  <div className="group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50 aspect-[16/10]">
+                    <img
+                      src={activeDisplayImageSrc}
+                      alt="Prestair WhatsApp Attachment"
+                      referrerPolicy="no-referrer"
+                      className="h-full w-full object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="absolute inset-0 bg-slate-950/0 group-hover:bg-slate-950/35 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-all cursor-pointer"
+                    >
+                      <span className="inline-flex items-center gap-1.5 rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-900 shadow-sm">
+                        <ImagePlus className="h-3.5 w-3.5 text-sky-700" />
+                        <span>Click to Replace Image</span>
+                      </span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-5 text-center space-y-2">
+                    <p className="text-xs font-medium text-slate-600">
+                      No image attached. Customers will receive only the text message.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold px-3 py-1.5 transition-colors cursor-pointer"
+                    >
+                      <ImagePlus className="h-3.5 w-3.5" />
+                      <span>Upload Image</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-sky-200 bg-slate-50 p-3.5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-bold text-slate-900">
+                    Edit WhatsApp Attachment Image
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingImage(false)}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-900 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    <span>Cancel</span>
+                  </button>
+                </div>
+
+                <div className="max-w-sm overflow-hidden rounded-lg border border-slate-200 bg-white flex items-center justify-center">
+                  <canvas
+                    ref={previewCanvasRef}
+                    className="max-h-56 w-auto max-w-full object-contain"
                   />
                 </div>
-              ))}
-            </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRotationDeg((prev) => (prev - 90 + 360) % 360)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-medium px-2.5 py-1.5 cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Rotate Left</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRotationDeg((prev) => (prev + 90) % 360)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-medium px-2.5 py-1.5 cursor-pointer"
+                  >
+                    <RotateCw className="h-3.5 w-3.5" />
+                    <span>Rotate Right</span>
+                  </button>
+
+                  <div className="inline-flex items-center rounded-lg border border-slate-300 bg-white p-0.5">
+                    {(['16:10', '4:3', '1:1', 'original'] as AspectPreset[]).map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setAspectPreset(preset)}
+                        className={`rounded-md px-2 py-1 text-[11px] font-semibold transition-colors cursor-pointer ${
+                          aspectPreset === preset
+                            ? 'bg-slate-900 text-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {preset === 'original' ? 'Full' : preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="block text-[11px] font-semibold text-slate-700 space-y-1">
+                    <span>Zoom ({zoomLevel.toFixed(1)}x)</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={2.2}
+                      step={0.05}
+                      value={zoomLevel}
+                      onChange={(e) => setZoomLevel(Number(e.target.value))}
+                      className="w-full accent-sky-700"
+                    />
+                  </label>
+                  <label className="block text-[11px] font-semibold text-slate-700 space-y-1">
+                    <span>Brightness ({brightnessPct}%)</span>
+                    <input
+                      type="range"
+                      min={80}
+                      max={125}
+                      step={1}
+                      value={brightnessPct}
+                      onChange={(e) => setBrightnessPct(Number(e.target.value))}
+                      className="w-full accent-sky-700"
+                    />
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingImage(false)}
+                    className="rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-medium px-3 py-1.5 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSavingImage}
+                    onClick={() => void handleApplyEditedImage()}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-semibold px-3.5 py-1.5 cursor-pointer"
+                  >
+                    {isSavingImage ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Check className="h-3.5 w-3.5" />
+                    )}
+                    <span>Apply &amp; Save Image</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {imageFeedback && (
+              <p
+                className={`text-xs font-medium rounded-lg px-3 py-2 border ${
+                  imageFeedback.type === 'error'
+                    ? 'text-rose-700 bg-rose-50 border-rose-200'
+                    : 'text-emerald-800 bg-emerald-50 border-emerald-200'
+                }`}
+              >
+                {imageFeedback.text}
+              </p>
+            )}
           </div>
 
           <div>
