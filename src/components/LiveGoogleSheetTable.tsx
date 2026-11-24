@@ -334,15 +334,15 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold text-slate-300 tracking-wide">
-              <th className="py-3 pl-4 pr-2 font-mono">#</th>
-              <th className="py-3 px-3">Capture State</th>
-              <th className="py-3 px-3">Customer Name</th>
-              <th className="py-3 px-3">Phone / WhatsApp</th>
-              <th className="py-3 px-3">Company Name</th>
-              <th className="py-3 px-3 text-right">Outlets</th>
-              <th className="py-3 px-3">Production Selection</th>
-              <th className="py-3 px-3">Updated</th>
-              {isAdminAuthenticated && <th className="py-3 pl-2 pr-4 text-right">Action</th>}
+              <th className="py-2.5 pl-3.5 pr-1.5 font-mono">#</th>
+              <th className="py-2.5 px-2.5">Status</th>
+              <th className="py-2.5 px-2.5">Customer</th>
+              <th className="py-2.5 px-2.5">Phone / WhatsApp</th>
+              <th className="py-2.5 px-2.5">Company</th>
+              <th className="py-2.5 px-2 text-right">Outlets</th>
+              <th className="py-2.5 px-2.5">Production</th>
+              <th className="py-2.5 pl-2 pr-3.5">Updated</th>
+              {isAdminAuthenticated && <th className="py-2.5 pl-1.5 pr-3.5 text-right">Action</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/80 text-xs">
@@ -378,40 +378,40 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
 
                 return (
                   <tr key={lead.leadId} className={`transition-colors ${rowBg}`}>
-                    <td className="py-3 pl-4 pr-2 font-mono text-slate-400 tabular-nums">
+                    <td className="py-2.5 pl-3.5 pr-1.5 font-mono text-slate-400 tabular-nums">
                       {idx + 1}
                     </td>
-                    <td className="py-3 px-3 whitespace-nowrap">
+                    <td className="py-2.5 px-2.5 whitespace-nowrap">
                       {isConfirmed ? (
                         <span className="font-semibold text-emerald-300">
-                          Confirmed {lead.whatsappSent ? '· WA Sent' : ''}
+                          Confirmed {lead.whatsappSent ? '· WA' : ''}
                         </span>
                       ) : (
                         <span className="font-semibold text-amber-300">
-                          Partial Draft {isCurrentDraft ? '· Typing Live' : '· Auto-Captured'}
+                          Partial {isCurrentDraft ? '· Live' : '· Draft'}
                         </span>
                       )}
                     </td>
-                    <td className="py-3 px-3 font-medium text-white">
+                    <td className="py-2.5 px-2.5 font-medium text-white">
                       {lead.name || <span className="text-slate-500 italic">Typing…</span>}
                     </td>
-                    <td className="py-3 px-3 font-mono text-slate-200 tabular-nums whitespace-nowrap">
+                    <td className="py-2.5 px-2.5 font-mono text-slate-200 tabular-nums whitespace-nowrap">
                       {lead.phone || <span className="text-slate-500 italic">—</span>}
                     </td>
-                    <td className="py-3 px-3 text-slate-200">
+                    <td className="py-2.5 px-2.5 text-slate-200">
                       {lead.companyName || <span className="text-slate-500 italic">—</span>}
                     </td>
-                    <td className="py-3 px-3 text-right font-mono text-slate-200 tabular-nums">
+                    <td className="py-2.5 px-2 text-right font-mono text-slate-200 tabular-nums">
                       {lead.outletsCount || '—'}
                     </td>
-                    <td className={`py-3 px-3 whitespace-nowrap ${productColor}`}>
+                    <td className={`py-2.5 px-2.5 whitespace-nowrap ${productColor}`}>
                       {lead.productInterest || 'Pending Choice'}
                     </td>
-                    <td className="py-3 px-3 text-slate-400 tabular-nums whitespace-nowrap">
+                    <td className="py-2.5 pl-2 pr-3.5 text-slate-400 tabular-nums whitespace-nowrap">
                       {formatReadableTimestamp(lead.updatedAt)}
                     </td>
                     {isAdminAuthenticated && (
-                      <td className="py-3 pl-2 pr-4 text-right">
+                      <td className="py-2.5 pl-1.5 pr-3.5 text-right">
                         <button
                           type="button"
                           onClick={() => setLeadToDelete(lead)}

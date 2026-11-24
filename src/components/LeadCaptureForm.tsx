@@ -52,7 +52,7 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
       className="w-full rounded-2xl border border-slate-800 bg-slate-900/90 p-5 sm:p-7 shadow-xl backdrop-blur-md"
     >
       {/* Top Company Identity Header: Logo + Prestier System LLP */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-800">
+      <div className="space-y-3 pb-4 border-b border-slate-800">
         <div className="flex items-center gap-3.5">
           {!logoFailed ? (
             <img
@@ -67,11 +67,11 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
               PS
             </div>
           )}
-          <div>
+          <div className="min-w-0">
             <p className="text-xs font-medium text-amber-400/90 tracking-wide">
               Precision Stainless Steel &amp; Retail Systems
             </p>
-            <h2 className="font-display text-xl sm:text-2xl font-bold text-white tracking-tight">
+            <h2 className="font-display text-xl sm:text-2xl font-bold text-white tracking-tight whitespace-nowrap">
               Prestier System LLP
             </h2>
           </div>
@@ -81,13 +81,13 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
         <div className="text-xs text-slate-400 flex items-center gap-1.5 tabular-nums">
           {syncState === 'saving' && (
             <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400 shrink-0" />
               <span className="text-sky-300 font-medium">Auto-capturing to Live Sheet…</span>
             </>
           )}
           {syncState === 'saved_partial' && (
             <>
-              <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
+              <CheckCircle2 className="h-3.5 w-3.5 text-amber-400 shrink-0" />
               <span className="text-amber-300 font-medium">
                 Live draft synced {lastSavedTime ? `· ${lastSavedTime}` : ''}
               </span>
@@ -95,7 +95,7 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
           )}
           {syncState === 'confirmed' && (
             <>
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
               <span className="text-emerald-300 font-medium">
                 Confirmed in Live Sheet {lastSavedTime ? `· ${lastSavedTime}` : ''}
               </span>
@@ -368,13 +368,10 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
             {isSubmitting ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin" />
-                <span>Confirming Lead &amp; Dispatching WhatsApp…</span>
+                <span>Submitting</span>
               </>
             ) : (
-              <>
-                <MessageCircle className="h-5 w-5" />
-                <span>Submit Inquiry &amp; Connect on WhatsApp</span>
-              </>
+              <span>Submit</span>
             )}
           </button>
           <p className="mt-2 text-center text-xs text-slate-400">

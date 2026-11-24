@@ -1,0 +1,82 @@
+[
+  {
+    "leadId": "lead_mwugiqka_9n3eo0",
+    "name": "Vikramaditya Singh",
+    "phone": "9820998877",
+    "companyName": "Royal Steel Supermart",
+    "outletsCount": "15",
+    "productInterest": "Electronic Shelf Label",
+    "status": "confirmed",
+    "whatsappSent": true,
+    "sheetSynced": false,
+    "sheetRowNumber": null,
+    "createdAt": "2026-11-24T08:53:02.456Z",
+    "updatedAt": "2026-11-24T08:53:09.706Z"
+  },
+  {
+    "leadId": "lead_1795508491083_58j8",
+    "name": "Abhishks",
+    "phone": "+917318531953",
+    "companyName": "sfff",
+    "outletsCount": "4",
+    "productInterest": "Display Cabinet",
+    "status": "confirmed",
+    "whatsappSent": true,
+    "sheetSynced": true,
+    "sheetRowNumber": null,
+    "createdAt": "2026-11-24T08:32:29.662Z",
+    "updatedAt": "2026-11-24T08:32:45.535Z"
+  },
+  {
+    "leadId": "lead_seed_101",
+    "name": "Rajeshwari Kulkarni",
+    "phone": "+91 98204 51230",
+    "companyName": "FreshMart Retail Chains",
+    "outletsCount": "18",
+    "productInterest": "Display Cabinet",
+    "status": "confirmed",
+    "whatsappSent": true,
+    "sheetSynced": false,
+    "createdAt": "2026-11-24T05:43:04.098Z",
+    "updatedAt": "2026-11-24T05:48:04.098Z"
+  },
+  {
+    "leadId": "lead_seed_102",
+    "name": "Siddharth Malhotra",
+    "phone": "+91 98112 77840",
+    "companyName": "Metro Hypervalue Stores",
+    "outletsCount": "42",
+    "productInterest": "Electronic Shelf Label",
+    "status": "confirmed",
+    "whatsappSent": true,
+    "sheetSynced": false,
+    "createdAt": "2026-11-24T06:38:04.098Z",
+    "updatedAt": "2026-11-24T06:43:04.098Z"
+  },
+  {
+    "leadId": "lead_seed_103",
+    "name": "Ananya Deshmukh",
+    "phone": "+91 97650 33190",
+    "companyName": "Artisan Crust Bakery Pvt Ltd",
+    "outletsCount": "7",
+    "productInterest": "Degree-In Equipment",
+    "status": "confirmed",
+    "whatsappSent": false,
+    "sheetSynced": false,
+    "createdAt": "2026-11-24T07:28:04.098Z",
+    "updatedAt": "2026-11-24T07:31:04.098Z"
+  },
+  {
+    "leadId": "lead_seed_104",
+    "name": "Deepak Agarwal",
+    "phone": "+91 98310 66201",
+    "companyName": "Agarwal Sweets & Dairy",
+    "outletsCount": "",
+    "productInterest": "",
+    "status": "partial",
+    "whatsappSent": false,
+    "sheetSynced": false,
+    "createdAt": "2026-11-24T07:51:04.098Z",
+    "updatedAt": "2026-11-24T07:53:04.098Z"
+  }
+]
