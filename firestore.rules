@@ -1,0 +1,184 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        request.auth.token.email == 'abhibroomies@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidProductInterest(val) {
+      return val in ['', 'Display Cabinet', 'Electronic Shelf Label', 'Degree-In Equipment'];
+    }
+
+    function isValidLead(data) {
+      return data.keys().hasAll([
+          'leadId',
+          'sessionToken',
+          'name',
+          'phone',
+          'companyName',
+          'outletsCount',
+          'productInterest',
+          'status',
+          'whatsappSent',
+          'sheetSynced',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'leadId',
+          'sessionToken',
+          'name',
+          'phone',
+          'companyName',
+          'outletsCount',
+          'productInterest',
+          'status',
+          'whatsappSent',
+          'sheetSynced',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.leadId) &&
+        data.leadId.size() >= 4 &&
+        data.sessionToken is string &&
+        data.sessionToken.size() >= 12 &&
+        data.sessionToken.size() <= 128 &&
+        data.sessionToken.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.name is string &&
+        data.name.size() <= 120 &&
+        data.phone is string &&
+        data.phone.size() <= 32 &&
+        data.companyName is string &&
+        data.companyName.size() <= 150 &&
+        data.outletsCount is string &&
+        data.outletsCount.size() <= 24 &&
+        data.productInterest is string &&
+        data.productInterest.size() <= 64 &&
+        isValidProductInterest(data.productInterest) &&
+        data.status in ['partial', 'confirmed'] &&
+        data.whatsappSent is bool &&
+        data.sheetSynced is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['email', 'role', 'createdAt']) &&
+        data.email is string &&
+        data.email.size() >= 3 &&
+        data.email.size() <= 160 &&
+        data.role == 'admin' &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidIntegrationConfig(data) {
+      return data.keys().hasAll([
+          'spreadsheetId',
+          'spreadsheetTitle',
+          'sheetName',
+          'autoSyncEnabled',
+          'updatedBy',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'spreadsheetId',
+          'spreadsheetTitle',
+          'sheetName',
+          'autoSyncEnabled',
+          'updatedBy',
+          'updatedAt'
+        ]) &&
+        data.spreadsheetId is string &&
+        data.spreadsheetId.size() <= 128 &&
+        data.spreadsheetTitle is string &&
+        data.spreadsheetTitle.size() <= 200 &&
+        data.sheetName is string &&
+        data.sheetName.size() <= 100 &&
+        data.autoSyncEnabled is bool &&
+        data.updatedBy is string &&
+        data.updatedBy.size() <= 128 &&
+        data.updatedAt is timestamp;
+    }
+
+    match /leads/{leadId} {
+      // PII isolation: only verified admins may read, list, or delete leads
+      allow get: if isValidId(leadId) && isAdmin();
+      allow list: if isAdmin();
+      allow delete: if isValidId(leadId) && isAdmin();
+
+      // Real-time lead creation (partial draft or direct submission)
+      allow create: if isValidId(leadId) &&
+        isValidLead(incoming()) &&
+        incoming().leadId == leadId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || (incoming().whatsappSent == false && incoming().sheetSynced == false));
+
+      // Action-based update with validation blueprint & terminal state locking
+      allow update: if isValidId(leadId) &&
+        isValidLead(incoming()) &&
+        incoming().leadId == existing().leadId &&
+        incoming().sessionToken == existing().sessionToken &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Tier 1: Admin override for sync flags, WhatsApp flags, or corrections
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'phone', 'companyName', 'outletsCount', 'productInterest', 'status', 'whatsappSent', 'sheetSynced', 'updatedAt'
+          ])) ||
+          // Tier 2: Active draft customer updating their own partial lead before confirmation
+          (existing().status == 'partial' &&
+            incoming().whatsappSent == existing().whatsappSent &&
+            incoming().sheetSynced == existing().sheetSynced &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'phone', 'companyName', 'outletsCount', 'productInterest', 'status', 'updatedAt'
+            ]))
+        );
+    }
+
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && (isAdmin() || (isVerified() && request.auth.uid == adminUid));
+      allow list: if isAdmin();
+      allow create: if isValidId(adminUid) && isAdmin() && isValidAdminUser(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(adminUid) && isAdmin() && isValidAdminUser(incoming()) && incoming().createdAt == existing().createdAt && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'role']);
+      allow delete: if isValidId(adminUid) && isAdmin();
+    }
+
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(settingId) && isAdmin() && isValidIntegrationConfig(incoming()) && incoming().updatedBy == request.auth.uid && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId) && isAdmin() && isValidIntegrationConfig(incoming()) && incoming().updatedBy == request.auth.uid && incoming().updatedAt == request.time && incoming().diff(existing()).affectedKeys().hasOnly(['spreadsheetId', 'spreadsheetTitle', 'sheetName', 'autoSyncEnabled', 'updatedBy', 'updatedAt']);
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+  }
+}

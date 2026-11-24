@@ -1,0 +1,6 @@
+{
+  "name": "Prestier System LLP — Lead Capture & Live Sheet Portal",
+  "description": "Real-time steel manufacturing lead capture portal for Prestier System LLP with automatic partial lead capture, live Google Sheets sync, Firebase Firestore persistence, and 24/7 persistent WhatsApp automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
