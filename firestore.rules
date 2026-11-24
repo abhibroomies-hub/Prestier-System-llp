@@ -27,15 +27,21 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'abhibroomies@gmail.com';
+    }
+
     function isAdmin() {
-      return isVerified() && (
-        request.auth.token.email == 'abhibroomies@gmail.com' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      return isBootstrappedAdmin() || (
+        isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
-    function isValidProductInterest(val) {
-      return val in ['', 'Display Cabinet', 'Electronic Shelf Label', 'Degree-In Equipment'];
+    function isValidProductInterestList(val) {
+      return val is list &&
+        val.size() <= 3 &&
+        val.hasOnly(['Display Cabinet', 'Electronic Shelf Label', 'Degree-In Equipment']) &&
+        (val.size() == 0 || val[0] is string);
     }
 
     function isValidLead(data) {
@@ -43,8 +49,11 @@ service cloud.firestore {
           'leadId',
           'sessionToken',
           'name',
+          'designation',
           'phone',
           'companyName',
+          'city',
+          'emailAddress',
           'outletsCount',
           'productInterest',
           'status',
@@ -57,8 +66,11 @@ service cloud.firestore {
           'leadId',
           'sessionToken',
           'name',
+          'designation',
           'phone',
           'companyName',
+          'city',
+          'emailAddress',
           'outletsCount',
           'productInterest',
           'status',
@@ -75,15 +87,19 @@ service cloud.firestore {
         data.sessionToken.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.name is string &&
         data.name.size() <= 120 &&
+        data.designation is string &&
+        data.designation.size() <= 100 &&
         data.phone is string &&
         data.phone.size() <= 32 &&
         data.companyName is string &&
         data.companyName.size() <= 150 &&
+        data.city is string &&
+        data.city.size() <= 100 &&
+        data.emailAddress is string &&
+        data.emailAddress.size() <= 150 &&
         data.outletsCount is string &&
         data.outletsCount.size() <= 24 &&
-        data.productInterest is string &&
-        data.productInterest.size() <= 64 &&
-        isValidProductInterest(data.productInterest) &&
+        isValidProductInterestList(data.productInterest) &&
         data.status in ['partial', 'confirmed'] &&
         data.whatsappSent is bool &&
         data.sheetSynced is bool &&
@@ -131,12 +147,38 @@ service cloud.firestore {
     }
 
     match /leads/{leadId} {
-      allow read, list, create, update, delete: if true;
+      allow get: if isValidId(leadId) && isAdmin();
+      allow list: if isBootstrappedAdmin() && existing().leadId is string;
+      allow delete: if isValidId(leadId) && isAdmin();
+
+      allow create: if isValidId(leadId) &&
+        isValidLead(incoming()) &&
+        incoming().leadId == leadId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || (incoming().whatsappSent == false && incoming().sheetSynced == false));
+
+      allow update: if isValidId(leadId) &&
+        isValidLead(incoming()) &&
+        incoming().leadId == existing().leadId &&
+        incoming().sessionToken == existing().sessionToken &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'designation', 'phone', 'companyName', 'city', 'emailAddress', 'outletsCount', 'productInterest', 'status', 'whatsappSent', 'sheetSynced', 'updatedAt'
+          ])) ||
+          (existing().status == 'partial' &&
+            incoming().whatsappSent == existing().whatsappSent &&
+            incoming().sheetSynced == existing().sheetSynced &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'designation', 'phone', 'companyName', 'city', 'emailAddress', 'outletsCount', 'productInterest', 'status', 'updatedAt'
+            ]))
+        );
     }
 
     match /admins/{adminUid} {
       allow get: if isValidId(adminUid) && (isAdmin() || (isVerified() && request.auth.uid == adminUid));
-      allow list: if isAdmin();
+      allow list: if isBootstrappedAdmin() && existing().role == 'admin';
       allow create: if isValidId(adminUid) && isAdmin() && isValidAdminUser(incoming()) && incoming().createdAt == request.time;
       allow update: if isValidId(adminUid) && isAdmin() && isValidAdminUser(incoming()) && incoming().createdAt == existing().createdAt && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'role']);
       allow delete: if isValidId(adminUid) && isAdmin();
@@ -144,7 +186,7 @@ service cloud.firestore {
 
     match /settings/{settingId} {
       allow get: if isValidId(settingId) && isAdmin();
-      allow list: if isAdmin();
+      allow list: if isBootstrappedAdmin() && existing().updatedBy is string;
       allow create: if isValidId(settingId) && isAdmin() && isValidIntegrationConfig(incoming()) && incoming().updatedBy == request.auth.uid && incoming().updatedAt == request.time;
       allow update: if isValidId(settingId) && isAdmin() && isValidIntegrationConfig(incoming()) && incoming().updatedBy == request.auth.uid && incoming().updatedAt == request.time && incoming().diff(existing()).affectedKeys().hasOnly(['spreadsheetId', 'spreadsheetTitle', 'sheetName', 'autoSyncEnabled', 'updatedBy', 'updatedAt']);
       allow delete: if isValidId(settingId) && isAdmin();

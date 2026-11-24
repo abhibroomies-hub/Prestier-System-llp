@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase/app';
+import { getAnalytics, isSupported as isAnalyticsSupported } from 'firebase/analytics';
 import {
   getAuth,
   GoogleAuthProvider,
@@ -7,12 +8,19 @@ import {
   type User,
 } from 'firebase/auth';
 import {
+  getDatabase,
+  onValue,
+  ref as dbRef,
+  remove as removeRtdb,
+  set as setRtdb,
+  update as updateRtdb,
+} from 'firebase/database';
+import {
   collection,
   doc,
   getDocFromServer,
   getFirestore,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -21,8 +29,11 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import rtdbConfig from '../../firebase-rtdb-config.json';
 import {
   LEAD_FIELD_LIMITS,
+  normalizeLeadRecord,
+  normalizeProductInterests,
   sanitizeLeadInput,
   type LeadFormInput,
   type LeadRecord,
@@ -32,6 +43,20 @@ import {
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+
+// Dedicated 24x7 Firebase Realtime Database instance (prestier-final)
+const rtdbApp = initializeApp(rtdbConfig, 'prestier-rtdb');
+export const rtdb = getDatabase(rtdbApp, rtdbConfig.databaseURL);
+
+if (typeof window !== 'undefined') {
+  void isAnalyticsSupported()
+    .then((supported) => {
+      if (supported) {
+        getAnalytics(rtdbApp);
+      }
+    })
+    .catch(() => {});
+}
 
 export const GOOGLE_SHEETS_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'] as const;
 
@@ -171,8 +196,11 @@ export async function saveLeadToFirestore(params: {
         leadId: leadId.slice(0, LEAD_FIELD_LIMITS.leadId),
         sessionToken: sessionToken.slice(0, LEAD_FIELD_LIMITS.sessionToken),
         name: sanitized.name,
+        designation: sanitized.designation,
         phone: sanitized.phone,
         companyName: sanitized.companyName,
+        city: sanitized.city,
+        emailAddress: sanitized.emailAddress,
         outletsCount: sanitized.outletsCount,
         productInterest: sanitized.productInterest,
         status,
@@ -185,8 +213,11 @@ export async function saveLeadToFirestore(params: {
     } else {
       await updateDoc(ref, {
         name: sanitized.name,
+        designation: sanitized.designation,
         phone: sanitized.phone,
         companyName: sanitized.companyName,
+        city: sanitized.city,
+        emailAddress: sanitized.emailAddress,
         outletsCount: sanitized.outletsCount,
         productInterest: sanitized.productInterest,
         status,
@@ -224,10 +255,13 @@ export function subscribeAdminFirestoreLeads(
         return {
           leadId: String(d.leadId || docSnap.id),
           name: String(d.name || ''),
+          designation: String(d.designation || ''),
           phone: String(d.phone || ''),
           companyName: String(d.companyName || ''),
+          city: String(d.city || ''),
+          emailAddress: String(d.emailAddress || ''),
           outletsCount: String(d.outletsCount || ''),
-          productInterest: (d.productInterest || '') as LeadRecord['productInterest'],
+          productInterest: normalizeProductInterests(d.productInterest),
           status: d.status === 'confirmed' ? 'confirmed' : 'partial',
           whatsappSent: Boolean(d.whatsappSent),
           sheetSynced: Boolean(d.sheetSynced),
@@ -262,9 +296,109 @@ export async function markFirestoreLeadSynced(leadId: string): Promise<void> {
 
 export async function deleteFirestoreLead(leadId: string): Promise<void> {
   const path = `leads/${leadId}`;
+  createdFirestoreDrafts.delete(leadId);
   try {
     await deleteDoc(doc(db, 'leads', leadId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
+
+// --- 24x7 Google Firebase Realtime Database (prestier-final) Client Helpers ---
+const createdRtdbDrafts = new Set<string>();
+
+function toSafeRtdbLeadKey(leadId: string): string | null {
+  const trimmed = leadId.trim().slice(0, LEAD_FIELD_LIMITS.leadId);
+  return /^[a-zA-Z0-9_-]{4,128}$/.test(trimmed) ? trimmed : null;
+}
+
+export async function saveLeadToRealtimeDb(params: {
+  leadId: string;
+  input: LeadFormInput;
+  status: LeadStatus;
+}): Promise<boolean> {
+  const safeKey = toSafeRtdbLeadKey(params.leadId);
+  if (!safeKey) return false;
+
+  const sanitized = sanitizeLeadInput(params.input);
+  const phoneDigits = sanitized.phone.replace(/\D/g, '');
+  const cleanedPhone = phoneDigits === '91' ? '' : sanitized.phone;
+  const nowIso = new Date().toISOString();
+
+  const updatePayload: Record<string, unknown> = {
+    leadId: safeKey,
+    name: sanitized.name,
+    designation: sanitized.designation,
+    phone: cleanedPhone,
+    companyName: sanitized.companyName,
+    city: sanitized.city,
+    emailAddress: sanitized.emailAddress,
+    outletsCount: sanitized.outletsCount,
+    productInterest: sanitized.productInterest,
+    status: params.status,
+    updatedAt: nowIso,
+  };
+
+  if (!createdRtdbDrafts.has(safeKey)) {
+    updatePayload.createdAt = nowIso;
+    createdRtdbDrafts.add(safeKey);
+  }
+
+  try {
+    await updateRtdb(dbRef(rtdb, `leads/${safeKey}`), updatePayload);
+    return true;
+  } catch (error) {
+    console.warn('Realtime Database client sync deferred:', {
+      leadId: safeKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+export function subscribeAdminRealtimeDbLeads(
+  onUpdate: (leads: LeadRecord[]) => void,
+  onError?: (err: Error) => void
+): Unsubscribe {
+  const leadsRef = dbRef(rtdb, 'leads');
+  return onValue(
+    leadsRef,
+    (snapshot) => {
+      const val = snapshot.val();
+      if (!val || typeof val !== 'object') {
+        onUpdate([]);
+        return;
+      }
+      const records: LeadRecord[] = [];
+      for (const [key, rawItem] of Object.entries(val as Record<string, unknown>)) {
+        if (rawItem && typeof rawItem === 'object') {
+          const itemWithId = { leadId: key, ...(rawItem as Record<string, unknown>) };
+          records.push(normalizeLeadRecord(itemWithId));
+        }
+      }
+      records.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      onUpdate(records);
+    },
+    (error) => {
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  );
+}
+
+export async function deleteRealtimeDbLead(leadId: string): Promise<void> {
+  const safeKey = toSafeRtdbLeadKey(leadId);
+  if (!safeKey) return;
+  createdRtdbDrafts.delete(safeKey);
+  try {
+    await Promise.all([
+      removeRtdb(dbRef(rtdb, `leads/${safeKey}`)),
+      setRtdb(dbRef(rtdb, `deletedLeads/${safeKey}`), new Date().toISOString()),
+    ]);
+  } catch (error) {
+    console.warn('Realtime Database delete warning:', {
+      leadId: safeKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+

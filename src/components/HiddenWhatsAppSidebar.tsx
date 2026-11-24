@@ -1,19 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
-  KeyRound,
   Loader2,
-  Lock,
-  LogOut,
   MessageCircle,
-  QrCode,
   RefreshCw,
+  RotateCcw,
   Send,
-  ShieldCheck,
   Smartphone,
   Unlink,
-  X,
 } from 'lucide-react';
+import {
+  DEFAULT_PRESTAIR_WHATSAPP_REPLY,
+  PRESTAIR_REPLY_IMAGES,
+} from '../utils/leadLogic';
 
 interface WhatsAppStatusPayload {
   status: 'disconnected' | 'connecting' | 'qr_ready' | 'pairing_ready' | 'connected';
@@ -34,116 +33,61 @@ interface WhatsAppStatusPayload {
 }
 
 interface HiddenWhatsAppSidebarProps {
-  isOpen: boolean;
   adminToken: string | null;
-  isConfigured: boolean;
-  onOpenTrigger: () => void;
-  onClose: () => void;
-  onAdminAuthenticated: (token: string) => void;
-  onAdminLogout: () => void;
 }
 
 export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
-  isOpen,
   adminToken,
-  isConfigured,
-  onOpenTrigger,
-  onClose,
-  onAdminAuthenticated,
-  onAdminLogout,
 }) => {
-  const [passwordInput, setPasswordInput] = useState('');
-  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-
   const [waStatus, setWaStatus] = useState<WhatsAppStatusPayload | null>(null);
   const [isLoadingWa, setIsLoadingWa] = useState(false);
   const [pairingPhone, setPairingPhone] = useState('');
   const [testPhone, setTestPhone] = useState('');
+  const [isSendingTest, setIsSendingTest] = useState(false);
   const [testFeedback, setTestFeedback] = useState<string | null>(null);
   const [settingsFeedback, setSettingsFeedback] = useState<string | null>(null);
 
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(true);
-  const [messageTemplate, setMessageTemplate] = useState('');
+  const [messageTemplate, setMessageTemplate] = useState(DEFAULT_PRESTAIR_WHATSAPP_REPLY);
   const [adminNotifyPhone, setAdminNotifyPhone] = useState('');
   const [showUnlinkConfirm, setShowUnlinkConfirm] = useState(false);
 
-  const fetchWhatsAppStatus = async (token: string, syncFormFields = false) => {
+  const fetchWhatsAppStatus = async (syncFormFields = false) => {
     try {
       const res = await fetch('/api/whatsapp/status', {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
       });
       if (!res.ok) return;
       const data: WhatsAppStatusPayload = await res.json();
       setWaStatus(data);
       if (syncFormFields && data.settings) {
         setAutoReplyEnabled(data.settings.autoReplyEnabled);
-        setMessageTemplate(data.settings.messageTemplate);
-        setAdminNotifyPhone(data.settings.adminNotifyPhone);
+        setMessageTemplate(data.settings.messageTemplate || DEFAULT_PRESTAIR_WHATSAPP_REPLY);
+        setAdminNotifyPhone(data.settings.adminNotifyPhone || '');
       }
     } catch {
-      // ignore transient network errors
+      // ignore transient network error
     }
   };
 
   useEffect(() => {
-    if (!isOpen || !adminToken) return;
     setIsLoadingWa(true);
-    fetchWhatsAppStatus(adminToken, true).finally(() => setIsLoadingWa(false));
+    fetchWhatsAppStatus(true).finally(() => setIsLoadingWa(false));
 
     const interval = setInterval(() => {
-      fetchWhatsAppStatus(adminToken, false);
+      void fetchWhatsAppStatus(false);
     }, 3500);
     return () => clearInterval(interval);
-  }, [isOpen, adminToken]);
-
-  const handlePasswordSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthError(null);
-
-    if (!passwordInput.trim()) {
-      setAuthError('Please enter your admin password.');
-      return;
-    }
-
-    if (!isConfigured && passwordInput.trim() !== confirmPasswordInput.trim()) {
-      setAuthError('Passwords do not match.');
-      return;
-    }
-
-    setIsAuthenticating(true);
-    try {
-      const endpoint = isConfigured ? '/api/admin/login' : '/api/admin/setup';
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: passwordInput.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'Authentication failed.');
-        return;
-      }
-      setPasswordInput('');
-      setConfirmPasswordInput('');
-      onAdminAuthenticated(data.token);
-    } catch {
-      setAuthError('Unable to reach server.');
-    } finally {
-      setIsAuthenticating(false);
-    }
-  };
+  }, [adminToken]);
 
   const handleStartWhatsApp = async (usePairingPhone = false) => {
-    if (!adminToken) return;
     setIsLoadingWa(true);
     setTestFeedback(null);
     try {
       await fetch('/api/whatsapp/connect', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${adminToken}`,
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -151,7 +95,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
         }),
       });
       setTimeout(() => {
-        fetchWhatsAppStatus(adminToken, false);
+        void fetchWhatsAppStatus(false);
       }, 1200);
     } finally {
       setIsLoadingWa(false);
@@ -159,15 +103,14 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
   };
 
   const handleUnlinkWhatsApp = async () => {
-    if (!adminToken) return;
     setIsLoadingWa(true);
     setShowUnlinkConfirm(false);
     try {
       await fetch('/api/whatsapp/disconnect', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${adminToken}` },
+        headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
       });
-      await fetchWhatsAppStatus(adminToken, false);
+      await fetchWhatsAppStatus(false);
     } finally {
       setIsLoadingWa(false);
     }
@@ -175,12 +118,11 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminToken) return;
     setSettingsFeedback(null);
     const res = await fetch('/api/whatsapp/settings', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${adminToken}`,
+        ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -190,409 +132,336 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
       }),
     });
     if (res.ok) {
-      setSettingsFeedback('24x7 WhatsApp automation rules saved.');
-      fetchWhatsAppStatus(adminToken, false);
+      setSettingsFeedback('WhatsApp auto-reply message and settings saved.');
+      void fetchWhatsAppStatus(false);
     }
   };
 
   const handleSendTestMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminToken || !testPhone.trim()) return;
+    if (!testPhone.trim()) return;
+    setIsSendingTest(true);
     setTestFeedback(null);
-    const res = await fetch('/api/whatsapp/test-message', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${adminToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ phone: testPhone.trim() }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) {
-      setTestFeedback(`Test message delivered to ${testPhone.trim()}.`);
-    } else {
-      setTestFeedback(data.error || 'Could not dispatch test message.');
+    try {
+      const res = await fetch('/api/whatsapp/test-message', {
+        method: 'POST',
+        headers: {
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone: testPhone.trim(),
+          text: messageTemplate,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setTestFeedback(
+          `Delivered Prestair reply + showcase image to ${testPhone.trim()}.`
+        );
+      } else {
+        setTestFeedback(data.error || 'Could not dispatch test message.');
+      }
+    } finally {
+      setIsSendingTest(false);
     }
   };
 
   return (
-    <>
-      {/* Specific Color Secret Edge Trigger Tab (Amber-Gold / Emerald Industrial Color Strip on Right Edge) */}
-      <button
-        type="button"
-        onClick={onOpenTrigger}
-        aria-label="Open Hidden WhatsApp Admin Sidebar"
-        title="Admin Access — Click Amber Color Tab"
-        className="fixed right-0 top-1/2 -translate-y-1/2 z-40 h-24 w-3.5 hover:w-5 rounded-l-xl bg-amber-500 hover:bg-amber-400 shadow-lg shadow-amber-500/30 border-l border-y border-amber-300/60 transition-all cursor-pointer flex items-center justify-center group"
-      >
-        <span className="sr-only">Open Hidden WhatsApp Admin Sidebar</span>
-        <span className="h-10 w-1 rounded-full bg-slate-950/60 group-hover:bg-slate-950" />
-      </button>
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {/* Left Column: 24x7 Multi-Device Link & Test Dispatch */}
+      <div className="lg:col-span-5 space-y-5">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="h-9 w-9 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700 shrink-0">
+                <MessageCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-xs text-slate-500">24x7 Persistent WhatsApp Session</p>
+                <h3 className="font-display text-sm font-bold text-slate-900">
+                  {waStatus?.status === 'connected'
+                    ? `Connected (${waStatus.connectedNumber || 'Active'})`
+                    : waStatus?.status === 'qr_ready'
+                      ? 'Scan QR Code Below'
+                      : waStatus?.status === 'pairing_ready'
+                        ? 'Enter Pairing Code on Phone'
+                        : waStatus?.status === 'connecting'
+                          ? 'Connecting to WhatsApp…'
+                          : 'Not Linked Yet'}
+                </h3>
+              </div>
+            </div>
 
-      {/* Slide-Over Hidden Drawer */}
-      {isOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="hidden-wa-sidebar-title"
-          className="fixed inset-0 z-50 flex justify-end bg-slate-950/75 backdrop-blur-sm"
-        >
-          <aside className="relative w-full max-w-md bg-slate-900 border-l border-slate-800 h-full overflow-y-auto p-6 flex flex-col justify-between shadow-2xl">
-            <div className="space-y-6">
-              {/* Drawer Header */}
-              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-                <div className="flex items-center gap-2.5">
-                  <div className="h-9 w-9 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400">
-                    <MessageCircle className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <h2
-                      id="hidden-wa-sidebar-title"
-                      className="font-display text-base font-bold text-white"
-                    >
-                      24x7 Persistent WhatsApp Vault
-                    </h2>
-                    <p className="text-xs text-slate-400">
-                      Prestier System LLP · Railway &amp; Cloud Keep-Alive
-                    </p>
-                  </div>
-                </div>
+            <button
+              type="button"
+              onClick={() => handleStartWhatsApp(false)}
+              disabled={isLoadingWa}
+              className="min-h-10 inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium px-3 py-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isLoadingWa ? 'animate-spin' : ''}`} />
+              <span>{waStatus?.status === 'connected' ? 'Check Status' : 'Generate QR'}</span>
+            </button>
+          </div>
+
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Auto-keepalive heartbeat runs every 20 seconds with automatic background reconnect so
+            your linked WhatsApp stays active 24x7 without logging out.
+          </p>
+
+          {waStatus?.lastError && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              {waStatus.lastError}
+            </p>
+          )}
+
+          {/* QR Code Display */}
+          {waStatus?.qrDataUrl && waStatus.status !== 'connected' && (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+              <img
+                src={waStatus.qrDataUrl}
+                alt="WhatsApp Multi-Device Login QR Code"
+                referrerPolicy="no-referrer"
+                className="h-52 w-52 sm:h-56 sm:w-56 object-contain rounded-lg bg-white p-2 border border-slate-200"
+              />
+              <p className="text-xs font-medium text-slate-700 text-center">
+                Open WhatsApp on your phone → Linked Devices → Link a Device
+              </p>
+            </div>
+          )}
+
+          {/* Pairing Code Option */}
+          {waStatus?.status !== 'connected' && (
+            <div className="pt-3 border-t border-slate-200 space-y-2">
+              <label
+                htmlFor="wa-pairing-phone"
+                className="block text-xs font-semibold text-slate-700"
+              >
+                Or Link with Phone Number Pairing Code
+              </label>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <input
+                  id="wa-pairing-phone"
+                  type="tel"
+                  value={pairingPhone}
+                  onChange={(e) => setPairingPhone(e.target.value)}
+                  placeholder="e.g. 919876543210"
+                  className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 sm:py-2 text-base sm:text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600 tabular-nums"
+                />
                 <button
                   type="button"
-                  onClick={onClose}
-                  aria-label="Close WhatsApp Admin Sidebar"
-                  className="rounded-lg p-2 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                  onClick={() => handleStartWhatsApp(true)}
+                  disabled={isLoadingWa || !pairingPhone.trim()}
+                  className="min-h-11 sm:min-h-9 inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-50 text-white text-xs font-semibold px-3.5 py-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  <X className="h-5 w-5" />
+                  <Smartphone className="h-3.5 w-3.5" />
+                  <span>Get Code</span>
                 </button>
               </div>
-
-              {!adminToken ? (
-                <form onSubmit={handlePasswordSubmit} className="space-y-4 pt-2">
-                  <div className="rounded-xl border border-amber-500/30 bg-amber-950/25 p-4 space-y-1.5">
-                    <div className="flex items-center gap-2 text-amber-300 font-semibold text-sm">
-                      <Lock className="h-4 w-4 shrink-0" />
-                      <span>Protected Admin Access</span>
-                    </div>
-                    <p className="text-xs text-slate-300 leading-relaxed">
-                      Enter admin password (default: <span className="font-mono text-amber-300">5060</span>) to unlock WhatsApp automation &amp; lead controls.
-                    </p>
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor="admin-vault-password"
-                      className="block text-xs font-medium text-slate-300 mb-1.5"
-                    >
-                      Admin Password
-                    </label>
-                    <div className="relative">
-                      <KeyRound className="h-4 w-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        id="admin-vault-password"
-                        type="password"
-                        required
-                        value={passwordInput}
-                        onChange={(e) => setPasswordInput(e.target.value)}
-                        placeholder="Enter password (e.g. 5060)"
-                        className="w-full rounded-xl border border-slate-700 bg-slate-950 pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
-                      />
-                    </div>
-                  </div>
-
-                  {authError && (
-                    <p role="alert" className="text-xs text-rose-400">
-                      {authError}
-                    </p>
-                  )}
-
-                  <button
-                    type="submit"
-                    disabled={isAuthenticating}
-                    className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-sm py-3 px-4 transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    {isAuthenticating ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>Verifying…</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck className="h-4 w-4" />
-                        <span>Unlock Admin Vault</span>
-                      </>
-                    )}
-                  </button>
-                </form>
-              ) : (
-                <div className="space-y-5">
-                  {/* Live Connection Status Banner */}
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-xs text-slate-400">24x7 Multi-Device Session</p>
-                        <p className="font-display text-sm font-bold text-white mt-0.5">
-                          {waStatus?.status === 'connected'
-                            ? `Connected (${waStatus.connectedNumber || 'Active'})`
-                            : waStatus?.status === 'qr_ready'
-                              ? 'Ready to Scan QR Code'
-                              : waStatus?.status === 'pairing_ready'
-                                ? 'Pairing Code Ready'
-                                : waStatus?.status === 'connecting'
-                                  ? 'Connecting to WhatsApp…'
-                                  : 'Not Linked Yet'}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleStartWhatsApp(false)}
-                        disabled={isLoadingWa}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-3 py-1.5 transition-colors cursor-pointer"
-                      >
-                        <RefreshCw className={`h-3.5 w-3.5 ${isLoadingWa ? 'animate-spin' : ''}`} />
-                        <span>
-                          {waStatus?.status === 'connected' ? 'Ping Keep-Alive' : 'Generate QR'}
-                        </span>
-                      </button>
-                    </div>
-
-                    <p className="text-xs text-slate-400 leading-relaxed">
-                      Credentials persist in{' '}
-                      <span className="font-mono text-slate-300">
-                        {waStatus?.authDir || './data/whatsapp_auth'}
-                      </span>{' '}
-                      with automatic exponential-backoff reconnect and 4-minute presence heartbeat so
-                      your WhatsApp never logs out on Railway.
-                    </p>
-
-                    {waStatus?.lastError && (
-                      <p className="text-xs text-amber-300 bg-amber-950/40 border border-amber-500/30 rounded-lg px-3 py-2">
-                        {waStatus.lastError}
-                      </p>
-                    )}
-
-                    {/* QR Code Display */}
-                    {waStatus?.qrDataUrl && waStatus.status !== 'connected' && (
-                      <div className="flex flex-col items-center justify-center rounded-xl bg-white p-4 space-y-2">
-                        <img
-                          src={waStatus.qrDataUrl}
-                          alt="WhatsApp Multi-Device Login QR Code"
-                          className="h-56 w-56 object-contain"
-                        />
-                        <p className="text-xs font-medium text-slate-800 text-center">
-                          Open WhatsApp on your phone → Linked Devices → Link a Device
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Phone Number Pairing Code Alternative */}
-                    {waStatus?.status !== 'connected' && (
-                      <div className="pt-2 border-t border-slate-800/80 space-y-2">
-                        <label
-                          htmlFor="wa-pairing-phone"
-                          className="block text-xs font-medium text-slate-300"
-                        >
-                          Or Link with Phone Number Pairing Code:
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            id="wa-pairing-phone"
-                            type="tel"
-                            value={pairingPhone}
-                            onChange={(e) => setPairingPhone(e.target.value)}
-                            placeholder="e.g. 919876543210"
-                            className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400 tabular-nums"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleStartWhatsApp(true)}
-                            disabled={isLoadingWa || !pairingPhone.trim()}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-2 transition-colors whitespace-nowrap cursor-pointer"
-                          >
-                            <Smartphone className="h-3.5 w-3.5" />
-                            <span>Get Code</span>
-                          </button>
-                        </div>
-                        {waStatus?.pairingCode && (
-                          <div className="rounded-lg bg-emerald-950/60 border border-emerald-500/40 p-3 text-center">
-                            <p className="text-xs text-emerald-300">Enter this code in WhatsApp:</p>
-                            <p className="font-mono text-xl font-bold tracking-widest text-white mt-1">
-                              {waStatus.pairingCode}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Connected State Actions */}
-                    {waStatus?.status === 'connected' && (
-                      <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-                        <span className="text-xs text-emerald-400 font-medium flex items-center gap-1.5">
-                          <CheckCircle2 className="h-4 w-4" />
-                          24x7 Auto-Keepalive Active
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setShowUnlinkConfirm(true)}
-                          className="inline-flex items-center gap-1 text-xs text-rose-400 hover:text-rose-300 font-medium cursor-pointer"
-                        >
-                          <Unlink className="h-3.5 w-3.5" />
-                          <span>Unlink Device</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Confirmation Modal before Unlinking WhatsApp */}
-                  {showUnlinkConfirm && (
-                    <div className="rounded-xl border border-rose-500/40 bg-rose-950/30 p-4 space-y-3">
-                      <p className="text-xs text-slate-200 font-medium">
-                        Unlink this WhatsApp session? You will need to scan a new QR code to resume
-                        automated 24x7 messages.
-                      </p>
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setShowUnlinkConfirm(false)}
-                          className="rounded-lg border border-slate-700 bg-slate-800 text-slate-200 text-xs px-3 py-1.5 cursor-pointer"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleUnlinkWhatsApp}
-                          className="rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 cursor-pointer"
-                        >
-                          Confirm Unlink
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Automated Reply Settings Form */}
-                  <form
-                    onSubmit={handleSaveSettings}
-                    className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3.5"
-                  >
-                    <div className="flex items-center justify-between">
-                      <label
-                        htmlFor="wa-auto-reply-toggle"
-                        className="text-xs font-semibold text-white"
-                      >
-                        Instant Auto-WhatsApp on Lead Submit
-                      </label>
-                      <input
-                        id="wa-auto-reply-toggle"
-                        type="checkbox"
-                        checked={autoReplyEnabled}
-                        onChange={(e) => setAutoReplyEnabled(e.target.checked)}
-                        className="h-4 w-4 accent-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor="wa-admin-notify-phone"
-                        className="block text-xs font-medium text-slate-300 mb-1"
-                      >
-                        Admin Alert WhatsApp Number (Optional)
-                      </label>
-                      <input
-                        id="wa-admin-notify-phone"
-                        type="tel"
-                        value={adminNotifyPhone}
-                        onChange={(e) => setAdminNotifyPhone(e.target.value)}
-                        placeholder="Receive instant lead alerts (e.g. 919876543210)"
-                        className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400 tabular-nums"
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor="wa-template-input"
-                        className="block text-xs font-medium text-slate-300 mb-1"
-                      >
-                        Customer WhatsApp Confirmation Template
-                      </label>
-                      <textarea
-                        id="wa-template-input"
-                        rows={5}
-                        value={messageTemplate}
-                        onChange={(e) => setMessageTemplate(e.target.value)}
-                        className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-xs text-white font-mono focus:outline-none focus:border-sky-400"
-                      />
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        Variables: {'{{name}}'}, {'{{companyName}}'}, {'{{outletsCount}}'},{' '}
-                        {'{{productInterest}}'}
-                      </p>
-                    </div>
-
-                    {settingsFeedback && (
-                      <p className="text-xs text-emerald-400">{settingsFeedback}</p>
-                    )}
-
-                    <button
-                      type="submit"
-                      className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold py-2.5 px-4 transition-colors cursor-pointer"
-                    >
-                      Save 24x7 Automation Settings
-                    </button>
-                  </form>
-
-                  {/* Send Live Test Message */}
-                  <form
-                    onSubmit={handleSendTestMessage}
-                    className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-2.5"
-                  >
-                    <label
-                      htmlFor="wa-test-phone"
-                      className="block text-xs font-semibold text-white"
-                    >
-                      Send Test WhatsApp Message
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        id="wa-test-phone"
-                        type="tel"
-                        value={testPhone}
-                        onChange={(e) => setTestPhone(e.target.value)}
-                        placeholder="Recipient phone (e.g. 9876543210)"
-                        className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400 tabular-nums"
-                      />
-                      <button
-                        type="submit"
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-semibold px-3 py-2 transition-colors cursor-pointer"
-                      >
-                        <Send className="h-3.5 w-3.5" />
-                        <span>Test</span>
-                      </button>
-                    </div>
-                    {testFeedback && <p className="text-xs text-sky-300">{testFeedback}</p>}
-                  </form>
+              {waStatus?.pairingCode && (
+                <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-center">
+                  <p className="text-xs text-emerald-800">Enter this code in WhatsApp:</p>
+                  <p className="font-mono text-xl font-bold tracking-widest text-slate-900 mt-1">
+                    {waStatus.pairingCode}
+                  </p>
                 </div>
               )}
             </div>
+          )}
 
-            {/* Footer Lock & Railway Deployment Note */}
-            <div className="pt-6 border-t border-slate-800 mt-6 flex items-center justify-between text-xs text-slate-400">
-              <div className="flex items-center gap-1.5">
-                <QrCode className="h-3.5 w-3.5 text-amber-400" />
-                <span>Railway Volume Ready</span>
-              </div>
-              {adminToken && (
+          {waStatus?.status === 'connected' && (
+            <div className="flex items-center justify-between pt-3 border-t border-slate-200">
+              <span className="text-xs text-emerald-700 font-semibold flex items-center gap-1.5">
+                <CheckCircle2 className="h-4 w-4" />
+                24x7 Keep-Alive Active
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowUnlinkConfirm(true)}
+                className="inline-flex items-center gap-1 text-xs text-rose-600 hover:text-rose-700 font-medium cursor-pointer"
+              >
+                <Unlink className="h-3.5 w-3.5" />
+                <span>Unlink Device</span>
+              </button>
+            </div>
+          )}
+
+          {showUnlinkConfirm && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 space-y-3">
+              <p className="text-xs text-slate-800 font-medium">
+                Unlink this WhatsApp device? You will need to scan a QR code again to send
+                automatic replies.
+              </p>
+              <div className="flex items-center justify-end gap-2">
                 <button
                   type="button"
-                  onClick={onAdminLogout}
-                  className="inline-flex items-center gap-1 text-slate-300 hover:text-white font-medium cursor-pointer"
+                  onClick={() => setShowUnlinkConfirm(false)}
+                  className="rounded-lg border border-slate-300 bg-white text-slate-700 text-xs px-3 py-1.5 cursor-pointer"
                 >
-                  <LogOut className="h-3.5 w-3.5" />
-                  <span>Lock Sidebar</span>
+                  Cancel
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={handleUnlinkWhatsApp}
+                  className="rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 cursor-pointer"
+                >
+                  Confirm Unlink
+                </button>
+              </div>
             </div>
-          </aside>
+          )}
         </div>
-      )}
-    </>
+
+        {/* Send Test Message with Images */}
+        <form
+          onSubmit={handleSendTestMessage}
+          className="rounded-xl border border-slate-200 bg-white p-5 space-y-3"
+        >
+          <label
+            htmlFor="wa-test-phone"
+            className="block text-sm font-bold text-slate-900"
+          >
+            Send Test Reply + Attached Image
+          </label>
+          <p className="text-xs text-slate-600">
+            Verify instant background delivery of your message and the Prestair showcase image to
+            any WhatsApp number.
+          </p>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <input
+              id="wa-test-phone"
+              type="tel"
+              value={testPhone}
+              onChange={(e) => setTestPhone(e.target.value)}
+              placeholder="Recipient WhatsApp (e.g. 9876543210)"
+              className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 sm:py-2 text-base sm:text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600 tabular-nums"
+            />
+            <button
+              type="submit"
+              disabled={isSendingTest || !testPhone.trim()}
+              className="min-h-11 sm:min-h-9 inline-flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              {isSendingTest ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Send className="h-3.5 w-3.5" />
+              )}
+              <span>Send Test</span>
+            </button>
+          </div>
+          {testFeedback && (
+            <p className="text-xs font-medium text-sky-800 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+              {testFeedback}
+            </p>
+          )}
+        </form>
+      </div>
+
+      {/* Right Column: Auto-Reply Message & Single Attached Prestair Image */}
+      <div className="lg:col-span-7">
+        <form
+          onSubmit={handleSaveSettings}
+          className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5">
+            <div>
+              <h3 className="font-display text-sm font-bold text-slate-900">
+                Instant Customer Reply &amp; Attached Image
+              </h3>
+              <p className="text-xs text-slate-600">
+                Dispatched automatically in the background as soon as a customer submits the form.
+              </p>
+            </div>
+            <label className="min-h-9 inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={autoReplyEnabled}
+                onChange={(e) => setAutoReplyEnabled(e.target.checked)}
+                className="h-4 w-4 accent-emerald-600 rounded"
+              />
+              <span>Auto-Reply Enabled</span>
+            </label>
+          </div>
+
+          {/* Single Attached Image Preview */}
+          <div>
+            <p className="text-xs font-semibold text-slate-700 mb-2">
+              Attached WhatsApp Image (1 Image Sent Automatically with Message)
+            </p>
+            <div className="max-w-sm">
+              {PRESTAIR_REPLY_IMAGES.map((src) => (
+                <div
+                  key={src}
+                  className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50 aspect-[16/10]"
+                >
+                  <img
+                    src={src}
+                    alt="Prestair WhatsApp Attachment"
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+              <label
+                htmlFor="wa-template-input"
+                className="block text-xs font-semibold text-slate-700"
+              >
+                Customer Reply Message
+              </label>
+              <button
+                type="button"
+                onClick={() => setMessageTemplate(DEFAULT_PRESTAIR_WHATSAPP_REPLY)}
+                className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-800 cursor-pointer whitespace-nowrap"
+              >
+                <RotateCcw className="h-3 w-3" />
+                <span>Restore Default Message</span>
+              </button>
+            </div>
+            <textarea
+              id="wa-template-input"
+              rows={9}
+              value={messageTemplate}
+              onChange={(e) => setMessageTemplate(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 bg-white p-3 text-base sm:text-xs text-slate-900 leading-relaxed focus:outline-none focus:border-sky-600"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="wa-admin-notify-phone"
+              className="block text-xs font-semibold text-slate-700 mb-1"
+            >
+              Admin Alert WhatsApp Number (Optional)
+            </label>
+            <input
+              id="wa-admin-notify-phone"
+              type="tel"
+              value={adminNotifyPhone}
+              onChange={(e) => setAdminNotifyPhone(e.target.value)}
+              placeholder="Receive instant lead summary alerts (e.g. +917318531953)"
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 sm:py-2 text-base sm:text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600 tabular-nums"
+            />
+          </div>
+
+          {settingsFeedback && (
+            <p className="text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+              {settingsFeedback}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            className="w-full min-h-11 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold py-2.5 px-4 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            Save WhatsApp Automation Settings
+          </button>
+        </form>
+      </div>
+    </div>
   );
 };

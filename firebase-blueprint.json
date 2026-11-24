@@ -24,6 +24,11 @@
           "description": "Customer full name.",
           "maxLength": 120
         },
+        "designation": {
+          "type": "string",
+          "description": "Customer job title or designation.",
+          "maxLength": 100
+        },
         "phone": {
           "type": "string",
           "description": "Customer phone or WhatsApp number.",
@@ -34,16 +39,24 @@
           "description": "Customer company or brand name.",
           "maxLength": 150
         },
+        "city": {
+          "type": "string",
+          "description": "Customer city.",
+          "maxLength": 100
+        },
+        "emailAddress": {
+          "type": "string",
+          "description": "Customer business or personal email address.",
+          "maxLength": 150
+        },
         "outletsCount": {
           "type": "string",
           "description": "Number of retail or commercial outlets.",
           "maxLength": 24
         },
         "productInterest": {
-          "type": "string",
-          "description": "Selected product category (empty while partial draft is still being filled).",
-          "enum": ["", "Display Cabinet", "Electronic Shelf Label", "Degree-In Equipment"],
-          "maxLength": 64
+          "type": "array",
+          "description": "Selected food service equipment categories (Display Cabinet, Electronic Shelf Label, Degree-In Equipment)."
         },
         "status": {
           "type": "string",
@@ -73,8 +86,11 @@
         "leadId",
         "sessionToken",
         "name",
+        "designation",
         "phone",
         "companyName",
+        "city",
+        "emailAddress",
         "outletsCount",
         "productInterest",
         "status",

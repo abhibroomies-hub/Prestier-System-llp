@@ -66,7 +66,7 @@ export async function createPrestierSpreadsheet(
   const sheetId: number = firstSheet?.sheetId ?? 0;
 
   // Write headers in Row 1
-  const headerRange = encodeURIComponent(`'${sheetName}'!A1:J1`);
+  const headerRange = encodeURIComponent(`'${sheetName}'!A1:M1`);
   await sheetsFetch(
     `${SHEETS_API_BASE}/${spreadsheetId}/values/${headerRange}?valueInputOption=USER_ENTERED`,
     accessToken,
@@ -231,7 +231,7 @@ export async function upsertLeadInGoogleSheet(
 
   // Ensure headers exist in Row 1
   if (rows.length === 0 || rows[0]?.[0] !== SHEET_HEADERS[0]) {
-    const headerRange = encodeURIComponent(`'${sheet.sheetName}'!A1:J1`);
+    const headerRange = encodeURIComponent(`'${sheet.sheetName}'!A1:M1`);
     await sheetsFetch(
       `${SHEETS_API_BASE}/${sheet.spreadsheetId}/values/${headerRange}?valueInputOption=USER_ENTERED`,
       accessToken,
@@ -247,7 +247,7 @@ export async function upsertLeadInGoogleSheet(
 
   if (matchIdx > 0) {
     const rowNumber = matchIdx + 1;
-    const updateRange = encodeURIComponent(`'${sheet.sheetName}'!A${rowNumber}:J${rowNumber}`);
+    const updateRange = encodeURIComponent(`'${sheet.sheetName}'!A${rowNumber}:M${rowNumber}`);
     await sheetsFetch(
       `${SHEETS_API_BASE}/${sheet.spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`,
       accessToken,
@@ -259,7 +259,7 @@ export async function upsertLeadInGoogleSheet(
     return rowNumber;
   }
 
-  const appendRange = encodeURIComponent(`'${sheet.sheetName}'!A1:J1`);
+  const appendRange = encodeURIComponent(`'${sheet.sheetName}'!A1:M1`);
   const appended = await sheetsFetch(
     `${SHEETS_API_BASE}/${sheet.spreadsheetId}/values/${appendRange}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     accessToken,
@@ -282,7 +282,7 @@ export async function syncAllLeadsToGoogleSheet(
   leads: LeadRecord[]
 ): Promise<number> {
   const values: string[][] = [[...SHEET_HEADERS], ...leads.map(formatLeadForSheetRow)];
-  const range = encodeURIComponent(`'${sheet.sheetName}'!A1:J${values.length}`);
+  const range = encodeURIComponent(`'${sheet.sheetName}'!A1:M${values.length}`);
   await sheetsFetch(
     `${SHEETS_API_BASE}/${sheet.spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`,
     accessToken,

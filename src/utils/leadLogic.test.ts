@@ -13,68 +13,82 @@ import {
   type LeadRecord,
 } from './leadLogic';
 
-test('sanitizeLeadInput trims strings and rejects unknown product interest', () => {
+test('sanitizeLeadInput trims strings and filters unknown product interests', () => {
   const sanitized = sanitizeLeadInput({
     name: '  Aarav Sharma \n',
+    designation: ' Director ',
     phone: '  +91 98765 43210 ',
     companyName: '  Apex Mart  ',
+    city: ' Mumbai ',
+    emailAddress: ' aarav@apex.com ',
     outletsCount: ' 14 ',
-    productInterest: 'Invalid Product' as any,
+    productInterest: ['Display Cabinet', 'Invalid Product'] as any,
   });
   assert.equal(sanitized.name, 'Aarav Sharma');
+  assert.equal(sanitized.designation, 'Director');
   assert.equal(sanitized.phone, '+91 98765 43210');
   assert.equal(sanitized.companyName, 'Apex Mart');
+  assert.equal(sanitized.city, 'Mumbai');
+  assert.equal(sanitized.emailAddress, 'aarav@apex.com');
   assert.equal(sanitized.outletsCount, '14');
-  assert.equal(sanitized.productInterest, '');
+  assert.deepEqual(sanitized.productInterest, ['Display Cabinet']);
 });
 
 test('hasAnyLeadContent detects partial keystroke drafts', () => {
   assert.equal(
     hasAnyLeadContent({
       name: '',
+      designation: '',
       phone: '',
       companyName: '',
+      city: '',
+      emailAddress: '',
       outletsCount: '',
-      productInterest: '',
+      productInterest: [],
     }),
     false
   );
   assert.equal(
     hasAnyLeadContent({
       name: 'R',
+      designation: '',
       phone: '',
       companyName: '',
+      city: '',
+      emailAddress: '',
       outletsCount: '',
-      productInterest: '',
+      productInterest: [],
     }),
     true
   );
 });
 
-test('validateLeadForSubmit enforces required fields and product choice', () => {
-  const invalid = validateLeadForSubmit({
-    name: 'A',
-    phone: '12345',
+test('validateLeadForSubmit allows optional fields with nothing compulsory', () => {
+  const emptySubmit = validateLeadForSubmit({
+    name: '',
+    designation: '',
+    phone: '+91 ',
     companyName: '',
-    outletsCount: '0',
-    productInterest: '',
+    city: '',
+    emailAddress: '',
+    outletsCount: '',
+    productInterest: [],
   });
-  assert.equal(invalid.valid, false);
-  assert.ok(invalid.errors.name);
-  assert.ok(invalid.errors.phone);
-  assert.ok(invalid.errors.companyName);
-  assert.ok(invalid.errors.outletsCount);
-  assert.ok(invalid.errors.productInterest);
+  assert.equal(emptySubmit.valid, true);
+  assert.deepEqual(emptySubmit.errors, {});
 
-  const valid = validateLeadForSubmit({
-    name: 'Rohan Patel',
-    phone: '9876543210',
-    companyName: 'Patel Supermart',
-    outletsCount: '6',
-    productInterest: 'Electronic Shelf Label',
+  const partialSubmit = validateLeadForSubmit({
+    name: 'Rohan',
+    designation: '',
+    phone: '',
+    companyName: '',
+    city: '',
+    emailAddress: '',
+    outletsCount: '',
+    productInterest: [],
   });
-  assert.equal(valid.valid, true);
-  assert.deepEqual(valid.errors, {});
+  assert.equal(partialSubmit.valid, true);
+  assert.deepEqual(partialSubmit.errors, {});
 });
 
 test('normalizePhoneForWhatsApp handles 10-digit Indian and international numbers', () => {
@@ -86,14 +100,16 @@ test('normalizePhoneForWhatsApp handles 10-digit Indian and international number
 test('buildWhatsAppConfirmationMessage and direct URL format cleanly', () => {
   const msg = buildWhatsAppConfirmationMessage({
     name: 'Meera Joshi',
+    designation: 'Manager',
     phone: '9820112233',
     companyName: 'Joshi Bakers',
+    city: 'Nagpur',
+    emailAddress: 'meera@joshibakers.com',
     outletsCount: '4',
-    productInterest: 'Degree-In Equipment',
+    productInterest: ['Degree-In Equipment'],
   });
-  assert.match(msg, /Meera Joshi/);
-  assert.match(msg, /Prestier System LLP/);
-  assert.match(msg, /Degree-In Equipment/);
+  assert.match(msg, /Thank you for your inquiry/);
+  assert.match(msg, /instagram.com\/prestairsystem/);
 
   const url = buildWhatsAppDirectUrl('9820112233', msg);
   assert.ok(url.startsWith('https://wa.me/919820112233?text='));
@@ -104,10 +120,13 @@ test('formatLeadForSheetRow, leadsToCsv, and computeLeadMetrics work accurately'
     {
       leadId: 'lead_1',
       name: 'Nikhil Verma',
+      designation: 'Director',
       phone: '9811122233',
       companyName: 'Verma Retail, Pvt Ltd',
+      city: 'Delhi',
+      emailAddress: 'nikhil@verma.com',
       outletsCount: '8',
-      productInterest: 'Display Cabinet',
+      productInterest: ['Display Cabinet'],
       status: 'confirmed',
       whatsappSent: true,
       sheetSynced: true,
@@ -117,10 +136,13 @@ test('formatLeadForSheetRow, leadsToCsv, and computeLeadMetrics work accurately'
     {
       leadId: 'lead_2',
       name: 'Karan',
+      designation: '',
       phone: '9899001122',
       companyName: '',
+      city: '',
+      emailAddress: '',
       outletsCount: '',
-      productInterest: '',
+      productInterest: [],
       status: 'partial',
       whatsappSent: false,
       sheetSynced: false,
@@ -131,7 +153,6 @@ test('formatLeadForSheetRow, leadsToCsv, and computeLeadMetrics work accurately'
 
   const row = formatLeadForSheetRow(sampleLeads[1]);
   assert.equal(row[1], 'PARTIAL (LIVE DRAFT)');
-  assert.equal(row[6], 'Pending Selection');
 
   const csv = leadsToCsv(sampleLeads);
   assert.match(csv, /"Verma Retail, Pvt Ltd"/);

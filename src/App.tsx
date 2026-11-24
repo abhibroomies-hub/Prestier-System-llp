@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  CheckCircle2,
+  FileSpreadsheet,
+  Loader2,
   Lock,
   MessageCircle,
-  ShieldCheck,
   X,
 } from 'lucide-react';
 import {
@@ -12,6 +12,7 @@ import {
   generateLeadId,
   generateSessionToken,
   hasAnyLeadContent,
+  normalizeLeadRecord,
   sanitizeLeadInput,
   validateLeadForSubmit,
   type LeadFormInput,
@@ -19,12 +20,15 @@ import {
 } from './utils/leadLogic';
 import {
   deleteFirestoreLead,
+  deleteRealtimeDbLead,
   getGoogleAccessToken,
   initGoogleAuth,
   markFirestoreLeadSynced,
   saveLeadToFirestore,
+  saveLeadToRealtimeDb,
   signInWithGoogleSheets,
   subscribeAdminFirestoreLeads,
+  subscribeAdminRealtimeDbLeads,
 } from './services/firebase';
 import {
   createPrestierSpreadsheet,
@@ -34,17 +38,24 @@ import {
   type ConnectedSpreadsheet,
 } from './services/googleSheets';
 import { LeadCaptureForm } from './components/LeadCaptureForm';
-import { LiveGoogleSheetTable } from './components/LiveGoogleSheetTable';
+import {
+  LiveGoogleSheetTable,
+  type RtdbAdminStatus,
+} from './components/LiveGoogleSheetTable';
 import { HiddenWhatsAppSidebar } from './components/HiddenWhatsAppSidebar';
+import { GoogleSheetAppsScriptPanel } from './components/GoogleSheetAppsScriptPanel';
 
-const STEEL_BG_SRC = '/src/assets/images/steel_manufacturing_bg_1795501416598.jpg';
+const CLEAN_WHITE_BG_SRC = '/src/assets/images/clean_white_showroom_bg_1795542678499.jpg';
 
 const INITIAL_FORM: LeadFormInput = {
   name: '',
+  designation: '',
   phone: '+91 ',
   companyName: '',
+  city: '',
+  emailAddress: '',
   outletsCount: '',
-  productInterest: '',
+  productInterest: [],
 };
 
 export default function App() {
@@ -52,6 +63,7 @@ export default function App() {
   const [errors, setErrors] = useState<Partial<Record<keyof LeadFormInput, string>>>({});
   const [activeLeadId, setActiveLeadId] = useState<string>(() => generateLeadId());
   const [sessionToken, setSessionToken] = useState<string>(() => generateSessionToken());
+  const [bgFailed, setBgFailed] = useState(false);
 
   const [syncState, setSyncState] = useState<'idle' | 'saving' | 'saved_partial' | 'confirmed'>(
     'idle'
@@ -63,8 +75,12 @@ export default function App() {
   const [whatsappDirectUrl, setWhatsappDirectUrl] = useState<string | null>(null);
 
   const [leads, setLeads] = useState<LeadRecord[]>([]);
+  const [rtdbStatus, setRtdbStatus] = useState<RtdbAdminStatus | null>(null);
+  const [isRefreshingLeads, setIsRefreshingLeads] = useState(false);
+  const [isSyncingRtdb, setIsSyncingRtdb] = useState(false);
+  const [resendingLeadId, setResendingLeadId] = useState<string | null>(null);
 
-  // Google Sheets OAuth State (in-memory access token)
+  // Google Sheets OAuth State
   const [googleUserEmail, setGoogleUserEmail] = useState<string | null>(null);
   const [connectedSheet, setConnectedSheet] = useState<ConnectedSpreadsheet | null>(null);
   const [isSigningInGoogle, setIsSigningInGoogle] = useState(false);
@@ -72,149 +88,253 @@ export default function App() {
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [sheetSuccessMsg, setSheetSuccessMsg] = useState<string | null>(null);
 
-  // Admin & Modals State
-  const [adminToken, setAdminToken] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('prestier_admin_token') || null;
-    } catch {
-      return null;
-    }
-  });
-  const [isAdminConfigured, setIsAdminConfigured] = useState(true);
+  // Admin Workspace & Password Gate State (in-memory session only, never persisted to localStorage)
+  const [adminToken, setAdminToken] = useState<string | null>(null);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
+  const [adminTab, setAdminTab] = useState<'leads' | 'sheets' | 'whatsapp'>('leads');
+  const [isPasscodeConfigured, setIsPasscodeConfigured] = useState<boolean | null>(null);
+  const [isCheckingAuthStatus, setIsCheckingAuthStatus] = useState(false);
+  const [adminPasscodeInput, setAdminPasscodeInput] = useState('');
+  const [isUnlockingAdmin, setIsUnlockingAdmin] = useState(false);
+  const [adminAuthError, setAdminAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     try {
-      if (adminToken) {
-        localStorage.setItem('prestier_admin_token', adminToken);
-      } else {
-        localStorage.removeItem('prestier_admin_token');
-      }
-    } catch {}
-  }, [adminToken]);
+      localStorage.removeItem('prestier_admin_token');
+    } catch {
+      // ignore storage restriction
+    }
+  }, []);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectedSheetRef = useRef<ConnectedSpreadsheet | null>(null);
   connectedSheetRef.current = connectedSheet;
+  const deletedLeadIdsRef = useRef<Set<string>>(
+    new Set(['lead_seed_101', 'lead_seed_102', 'lead_seed_103', 'lead_seed_104'])
+  );
 
-  // 1. Load initial leads + subscribe to real-time SSE stream
-  const fetchInitialLeads = useCallback(async () => {
-    try {
-      const res = await fetch('/api/leads');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.leads)) {
-          setLeads(data.leads);
-        }
+  const registerDeletedIds = useCallback((ids: unknown) => {
+    if (!Array.isArray(ids)) return;
+    for (const raw of ids) {
+      if (typeof raw === 'string' && raw.trim()) {
+        deletedLeadIdsRef.current.add(raw.trim());
       }
-    } catch {
-      // ignore offline error
     }
   }, []);
 
-  useEffect(() => {
-    void fetchInitialLeads();
+  const applyServerSnapshot = useCallback(
+    (incomingLeads: unknown, deletedIds?: unknown, incomingRtdb?: unknown) => {
+      registerDeletedIds(deletedIds);
+      if (incomingRtdb && typeof incomingRtdb === 'object') {
+        setRtdbStatus(incomingRtdb as RtdbAdminStatus);
+      }
+      if (Array.isArray(incomingLeads)) {
+        const cleaned = incomingLeads
+          .map((item) => normalizeLeadRecord(item))
+          .filter((item) => !deletedLeadIdsRef.current.has(item.leadId))
+          .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+        setLeads(cleaned);
+      }
+    },
+    [registerDeletedIds]
+  );
 
-    const es = new EventSource('/api/leads/stream');
-    es.addEventListener('leads', (event) => {
+  const mergeIncomingLeads = useCallback((incomingList: LeadRecord[]) => {
+    setLeads((prev) => {
+      const map = new Map<string, LeadRecord>();
+      for (const item of prev) {
+        const norm = normalizeLeadRecord(item);
+        if (!deletedLeadIdsRef.current.has(norm.leadId)) {
+          map.set(norm.leadId, norm);
+        }
+      }
+      for (const item of incomingList) {
+        const norm = normalizeLeadRecord(item);
+        if (deletedLeadIdsRef.current.has(norm.leadId)) continue;
+        const existing = map.get(norm.leadId);
+        if (
+          !existing ||
+          new Date(norm.updatedAt).getTime() >= new Date(existing.updatedAt).getTime() ||
+          (norm.whatsappSent && !existing.whatsappSent) ||
+          (norm.status === 'confirmed' && existing.status !== 'confirmed')
+        ) {
+          map.set(norm.leadId, norm);
+        }
+      }
+      return Array.from(map.values()).sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      );
+    });
+  }, []);
+
+  // Fetch leads from protected backend API using verified Bearer token
+  const fetchInitialLeads = useCallback(
+    async (tokenOverride?: string | null) => {
+      const tokenToUse = tokenOverride !== undefined ? tokenOverride : adminToken;
+      if (!tokenToUse) return;
+
+      setIsRefreshingLeads(true);
       try {
-        const parsed = JSON.parse((event as MessageEvent).data);
-        if (parsed.type === 'upsert' && parsed.payload) {
-          const incoming: LeadRecord = parsed.payload;
-          setLeads((prev) => {
-            const idx = prev.findIndex((item) => item.leadId === incoming.leadId);
-            if (idx >= 0) {
-              const copy = [...prev];
-              copy[idx] = incoming;
-              return copy;
-            }
-            return [incoming, ...prev];
-          });
-        } else if (parsed.type === 'delete' && parsed.payload?.leadId) {
-          setLeads((prev) => prev.filter((item) => item.leadId !== parsed.payload.leadId));
-        } else if (parsed.type === 'sync') {
-          void fetchInitialLeads();
+        const res = await fetch(`/api/leads?t=${Date.now()}`, {
+          cache: 'no-store',
+          headers: {
+            Authorization: `Bearer ${tokenToUse}`,
+          },
+        });
+        if (res.status === 401) {
+          setAdminToken(null);
+          return;
+        }
+        if (res.ok) {
+          const data = await res.json();
+          applyServerSnapshot(data.leads, data.deletedIds, data.rtdb);
         }
       } catch {
-        // ignore malformed event
+        // ignore transient network error
+      } finally {
+        setIsRefreshingLeads(false);
       }
-    });
+    },
+    [adminToken, applyServerSnapshot]
+  );
 
+  // Attach 24x7 Firebase Realtime Database live stream ONLY when Admin is unlocked
+  useEffect(() => {
+    if (!isAdminModalOpen || !adminToken) return;
+    let unsubscribeRtdb: (() => void) | undefined;
+    try {
+      unsubscribeRtdb = subscribeAdminRealtimeDbLeads(
+        (rtdbLeads) => {
+          if (rtdbLeads && rtdbLeads.length > 0) {
+            mergeIncomingLeads(rtdbLeads);
+          }
+        },
+        () => {}
+      );
+    } catch {
+      // ignore
+    }
+    return () => {
+      unsubscribeRtdb?.();
+    };
+  }, [isAdminModalOpen, adminToken, mergeIncomingLeads]);
+
+  // Attach Firestore real-time listener ONLY when Admin is unlocked & authenticated with Google
+  useEffect(() => {
+    if (!googleUserEmail || !adminToken) return;
     let unsubscribeFirestore: (() => void) | undefined;
     try {
-      unsubscribeFirestore = subscribeAdminFirestoreLeads((firestoreLeads) => {
-        if (firestoreLeads && firestoreLeads.length > 0) {
-          setLeads((prev) => {
-            const map = new Map<string, LeadRecord>();
-            for (const l of prev) {
-              map.set(l.leadId, l);
-            }
-            for (const l of firestoreLeads) {
-              const existing = map.get(l.leadId);
-              if (!existing || new Date(l.updatedAt).getTime() >= new Date(existing.updatedAt).getTime()) {
-                map.set(l.leadId, l);
-              }
-            }
-            return Array.from(map.values()).sort(
-              (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-            );
-          });
-        }
-      }, () => {});
+      unsubscribeFirestore = subscribeAdminFirestoreLeads(
+        (firestoreLeads) => {
+          if (firestoreLeads && firestoreLeads.length > 0) {
+            mergeIncomingLeads(firestoreLeads);
+          }
+        },
+        () => {}
+      );
     } catch {
       // ignore
     }
-
     return () => {
-      es.close();
       unsubscribeFirestore?.();
     };
-  }, [fetchInitialLeads]);
+  }, [googleUserEmail, adminToken, mergeIncomingLeads]);
 
+  // Instant <10ms Server-Sent Events (SSE) stream + fallback sync while Admin Modal is unlocked
   useEffect(() => {
-    if (isAdminModalOpen) {
-      void fetchInitialLeads();
-    }
-  }, [isAdminModalOpen, fetchInitialLeads]);
+    if (!isAdminModalOpen || !adminToken) return;
 
-  // 2. Check Admin Password Configuration Status
-  const checkAdminStatus = useCallback(async (token?: string | null) => {
-    try {
-      const res = await fetch('/api/admin/auth-status', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setIsAdminConfigured(Boolean(data.isConfigured));
+    let cancelled = false;
+    let abortController: AbortController | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connectLiveStream = async () => {
+      if (cancelled) return;
+      abortController = new AbortController();
+      try {
+        const res = await fetch('/api/leads/stream', {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            Accept: 'text/event-stream',
+          },
+          signal: abortController.signal,
+        });
+
+        if (res.status === 401) {
+          setAdminToken(null);
+          return;
+        }
+
+        if (!res.ok || !res.body) {
+          throw new Error('SSE stream unavailable');
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (!cancelled) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let boundaryIdx = buffer.indexOf('\n\n');
+          while (boundaryIdx !== -1) {
+            const rawEvent = buffer.slice(0, boundaryIdx);
+            buffer = buffer.slice(boundaryIdx + 2);
+
+            for (const line of rawEvent.split('\n')) {
+              if (line.startsWith('data:')) {
+                const jsonStr = line.slice(5).trim();
+                if (jsonStr) {
+                  try {
+                    const parsed = JSON.parse(jsonStr);
+                    if (parsed && parsed.type === 'snapshot') {
+                      applyServerSnapshot(parsed.leads, parsed.deletedIds, parsed.rtdb);
+                    }
+                  } catch {
+                    // ignore malformed SSE frame
+                  }
+                }
+              }
+            }
+
+            boundaryIdx = buffer.indexOf('\n\n');
+          }
+        }
+      } catch {
+        // Reconnect below unless cancelled
       }
-    } catch {
-      // ignore
-    }
-  }, []);
 
-  useEffect(() => {
-    void checkAdminStatus(adminToken);
-  }, [adminToken, checkAdminStatus]);
+      if (!cancelled) {
+        reconnectTimer = setTimeout(() => {
+          void connectLiveStream();
+        }, 1500);
+      }
+    };
 
-  // 3. Initialize Firebase Google Auth Listener
+    void connectLiveStream();
+
+    const fallbackPollTimer = setInterval(() => {
+      void fetchInitialLeads(adminToken);
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      abortController?.abort();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearInterval(fallbackPollTimer);
+    };
+  }, [isAdminModalOpen, adminToken, applyServerSnapshot, fetchInitialLeads]);
+
+  // Initialize Firebase Google Auth Listener (for Google Sheets sync inside Admin)
   useEffect(() => {
     const unsub = initGoogleAuth(
       (user) => {
         const email = user.email || user.displayName || 'Connected User';
         setGoogleUserEmail(email);
-        void fetch('/api/admin/google-login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email }),
-        })
-          .then((r) => r.json())
-          .then((d) => {
-            if (d.token) {
-              setAdminToken(d.token);
-              setIsAdminConfigured(true);
-            }
-          })
-          .catch(() => {});
       },
       () => {
         setGoogleUserEmail(null);
@@ -223,7 +343,84 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 4. Sync a single lead to Google Sheets if a spreadsheet is connected
+  const handleOpenAdminModal = async () => {
+    setAdminTab('leads');
+    setAdminPasscodeInput('');
+    setAdminAuthError(null);
+    setIsAdminModalOpen(true);
+
+    setIsCheckingAuthStatus(true);
+    try {
+      const res = await fetch('/api/admin/auth-status', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setIsPasscodeConfigured(Boolean(data.isConfigured));
+      } else {
+        setIsPasscodeConfigured(true);
+      }
+    } catch {
+      setIsPasscodeConfigured(true);
+    } finally {
+      setIsCheckingAuthStatus(false);
+    }
+  };
+
+  const handleCloseAdminModal = () => {
+    const currentToken = adminToken;
+    setIsAdminModalOpen(false);
+    setAdminToken(null);
+    setAdminPasscodeInput('');
+    setAdminAuthError(null);
+    setLeads([]);
+
+    if (currentToken) {
+      void fetch('/api/admin/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentToken}` },
+      }).catch(() => {});
+    }
+  };
+
+  const handleAdminAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = adminPasscodeInput.trim();
+    if (!trimmed) {
+      setAdminAuthError('Please enter the admin password.');
+      return;
+    }
+
+    setIsUnlockingAdmin(true);
+    setAdminAuthError(null);
+    try {
+      const endpoint = isPasscodeConfigured === false ? '/api/admin/setup' : '/api/admin/login';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: trimmed }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data.token) {
+        if (res.status === 409) {
+          setIsPasscodeConfigured(endpoint === '/api/admin/setup');
+        }
+        setAdminAuthError(data.error || 'Incorrect password. Please try again.');
+        return;
+      }
+
+      setIsPasscodeConfigured(true);
+      setAdminPasscodeInput('');
+      // Hydrate leads, deleted tombstones & RTDB status in 0ms right from login response
+      applyServerSnapshot(data.leads, data.deletedIds, data.rtdb);
+      setAdminToken(data.token);
+    } catch {
+      setAdminAuthError('Unable to verify password right now. Please try again.');
+    } finally {
+      setIsUnlockingAdmin(false);
+    }
+  };
+
+  // Push single lead to connected Google Sheet
   const pushLeadToConnectedGoogleSheet = useCallback(async (lead: LeadRecord) => {
     const token = getGoogleAccessToken();
     const sheet = connectedSheetRef.current;
@@ -236,7 +433,7 @@ export default function App() {
     }
   }, []);
 
-  // 5. Core Real-Time Persist Function (runs automatically on keystrokes AND on submit)
+  // Persist lead to API + RTDB + Firestore
   const persistLeadRealTime = useCallback(
     async (
       currentLeadId: string,
@@ -244,17 +441,11 @@ export default function App() {
       input: LeadFormInput,
       status: 'partial' | 'confirmed'
     ) => {
+      if (deletedLeadIdsRef.current.has(currentLeadId)) return null;
       const sanitized = sanitizeLeadInput(input);
-      if (!hasAnyLeadContent(sanitized)) return null;
+      if (status === 'partial' && !hasAnyLeadContent(sanitized)) return null;
 
       setSyncState('saving');
-
-      const firestorePromise = saveLeadToFirestore({
-        leadId: currentLeadId,
-        sessionToken: currentSessionToken,
-        input: sanitized,
-        status,
-      });
 
       const apiPromise = fetch('/api/leads/upsert', {
         method: 'POST',
@@ -266,7 +457,21 @@ export default function App() {
         }),
       }).then(async (res) => (res.ok ? res.json() : null));
 
-      const [, apiResult] = await Promise.all([firestorePromise, apiPromise]);
+      // Sync to 24x7 Firebase Realtime Database (prestier-final) and Firestore in parallel
+      void saveLeadToRealtimeDb({
+        leadId: currentLeadId,
+        input: sanitized,
+        status,
+      });
+
+      void saveLeadToFirestore({
+        leadId: currentLeadId,
+        sessionToken: currentSessionToken,
+        input: sanitized,
+        status,
+      });
+
+      const apiResult = await apiPromise;
 
       const nowFormatted = new Date().toLocaleTimeString([], {
         hour: '2-digit',
@@ -276,20 +481,29 @@ export default function App() {
       setLastSavedTime(nowFormatted);
       setSyncState(status === 'confirmed' ? 'confirmed' : 'saved_partial');
 
-      if (apiResult?.lead) {
-        void pushLeadToConnectedGoogleSheet(apiResult.lead as LeadRecord);
+      if (apiResult?.lead && !deletedLeadIdsRef.current.has(currentLeadId)) {
+        const savedRecord = normalizeLeadRecord(apiResult.lead);
+        mergeIncomingLeads([savedRecord]);
+        void pushLeadToConnectedGoogleSheet(savedRecord);
       }
 
       return apiResult;
     },
-    [pushLeadToConnectedGoogleSheet]
+    [mergeIncomingLeads, pushLeadToConnectedGoogleSheet]
   );
 
-  // 6. Field change handler with instant optimistic table reflection + 380ms debounced auto-save
+  // Field change handler with instant optimistic update + 120ms millisecond auto-save
   const handleFieldChange = <K extends keyof LeadFormInput>(
     field: K,
     value: LeadFormInput[K]
   ) => {
+    const effectiveLeadId = deletedLeadIdsRef.current.has(activeLeadId)
+      ? generateLeadId()
+      : activeLeadId;
+    if (effectiveLeadId !== activeLeadId) {
+      setActiveLeadId(effectiveLeadId);
+    }
+
     const updatedForm: LeadFormInput = {
       ...form,
       [field]: value,
@@ -306,12 +520,15 @@ export default function App() {
     if (hasAnyLeadContent(sanitized)) {
       const nowIso = new Date().toISOString();
       setLeads((prev) => {
-        const idx = prev.findIndex((item) => item.leadId === activeLeadId);
+        const idx = prev.findIndex((item) => item.leadId === effectiveLeadId);
         const optimisticRecord: LeadRecord = {
-          leadId: activeLeadId,
+          leadId: effectiveLeadId,
           name: sanitized.name,
+          designation: sanitized.designation,
           phone: sanitized.phone,
           companyName: sanitized.companyName,
+          city: sanitized.city,
+          emailAddress: sanitized.emailAddress,
           outletsCount: sanitized.outletsCount,
           productInterest: sanitized.productInterest,
           status: targetStatus,
@@ -334,13 +551,14 @@ export default function App() {
     }
 
     debounceTimerRef.current = setTimeout(() => {
-      void persistLeadRealTime(activeLeadId, sessionToken, updatedForm, targetStatus);
-    }, 380);
+      void persistLeadRealTime(effectiveLeadId, sessionToken, updatedForm, targetStatus);
+    }, 120);
   };
 
-  // Flush pending draft if customer closes tab without clicking Submit
+  // Flush pending draft if customer closes tab (never resurrect a deleted lead)
   useEffect(() => {
     const handlePageHide = () => {
+      if (deletedLeadIdsRef.current.has(activeLeadId)) return;
       const sanitized = sanitizeLeadInput(form);
       if (!hasAnyLeadContent(sanitized)) return;
       const payload = JSON.stringify({
@@ -357,7 +575,7 @@ export default function App() {
     return () => window.removeEventListener('pagehide', handlePageHide);
   }, [form, activeLeadId, syncState]);
 
-  // 7. Full Confirmed Form Submission + WhatsApp Dispatch
+  // Confirmed Form Submission + Instant Background WhatsApp Dispatch
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (debounceTimerRef.current) {
@@ -378,9 +596,14 @@ export default function App() {
     setErrors({});
     setIsSubmitting(true);
     try {
-      const result = await persistLeadRealTime(activeLeadId, sessionToken, sanitized, 'confirmed');
+      const result = await persistLeadRealTime(
+        activeLeadId,
+        sessionToken,
+        sanitized,
+        'confirmed'
+      );
       setSubmittedLeadId(activeLeadId);
-      setWhatsappSentAuto(Boolean(result?.whatsappDispatchedNow));
+      setWhatsappSentAuto(Boolean(result?.whatsappQueuedInBackground));
       const waMsg = buildWhatsAppConfirmationMessage(sanitized);
       setWhatsappDirectUrl(buildWhatsAppDirectUrl(sanitized.phone, waMsg));
     } finally {
@@ -388,7 +611,7 @@ export default function App() {
     }
   };
 
-  const handleStartNewLead = () => {
+  const handleStartNewLead = useCallback(() => {
     setForm(INITIAL_FORM);
     setErrors({});
     setActiveLeadId(generateLeadId());
@@ -397,9 +620,9 @@ export default function App() {
     setSubmittedLeadId(null);
     setWhatsappSentAuto(false);
     setWhatsappDirectUrl(null);
-  };
+  }, []);
 
-  // 8. Google Sheets OAuth Handlers (Seamless Single Login for Sheets, WhatsApp & Admin)
+  // Google Sheets OAuth Handlers
   const handleGoogleSignIn = async () => {
     setIsSigningInGoogle(true);
     setSheetError(null);
@@ -409,28 +632,13 @@ export default function App() {
       const email = user.email || user.displayName || 'Connected User';
       setGoogleUserEmail(email);
 
-      // Seamless admin token acquisition using same Google sign-in
-      const adminRes = await fetch('/api/admin/google-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-      if (adminRes.ok) {
-        const adminData = await adminRes.json();
-        if (adminData.token) {
-          setAdminToken(adminData.token);
-          setIsAdminConfigured(true);
-        }
-      }
-
       setIsSyncingSheet(true);
       const created = await createPrestierSpreadsheet(accessToken);
       setConnectedSheet(created);
       await syncAllLeadsToGoogleSheet(accessToken, created, leads);
       setSheetSuccessMsg(
-        `Created & synced "${created.title}" (${leads.length} rows including partial drafts).`
+        `Created & synced "${created.title}" (${leads.length} rows).`
       );
-      setIsAdminModalOpen(true);
     } catch (err: any) {
       setSheetError(err?.message || 'Google Sign-In failed. Please try again.');
     } finally {
@@ -463,7 +671,7 @@ export default function App() {
   const handleConnectExistingSheet = async (idOrUrl: string) => {
     const token = getGoogleAccessToken();
     if (!token) {
-      setSheetError('Please Sign in with Google first.');
+      setSheetError('Please Connect Google Sheets first.');
       return;
     }
     setIsSyncingSheet(true);
@@ -490,16 +698,14 @@ export default function App() {
     try {
       const count = await syncAllLeadsToGoogleSheet(token, connectedSheet, leads);
       setSheetSuccessMsg(`Synced all ${count} rows to Google Sheet (${connectedSheet.sheetName}).`);
-      if (adminToken) {
-        await fetch('/api/leads/mark-synced', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${adminToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ leadIds: leads.map((l) => l.leadId) }),
-        });
-      }
+      await fetch('/api/leads/mark-synced', {
+        method: 'POST',
+        headers: {
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ leadIds: leads.map((l) => l.leadId) }),
+      });
     } catch (err: any) {
       setSheetError(err?.message || 'Failed to sync rows to Google Sheet.');
     } finally {
@@ -507,50 +713,145 @@ export default function App() {
     }
   };
 
-  const handleDeleteLead = async (lead: LeadRecord) => {
-    if (!adminToken) return;
+  const handleResendWhatsApp = async (lead: LeadRecord) => {
+    setResendingLeadId(lead.leadId);
+    setSheetError(null);
+    setSheetSuccessMsg(null);
     try {
-      await fetch(`/api/leads/${encodeURIComponent(lead.leadId)}`, {
-        method: 'DELETE',
+      const res = await fetch(
+        `/api/leads/${encodeURIComponent(lead.leadId)}/resend-whatsapp`,
+        {
+          method: 'POST',
+          headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSheetError(
+          data.error ||
+            'Could not send WhatsApp message. Check 24x7 WhatsApp tab to ensure QR is linked.'
+        );
+      } else {
+        setSheetSuccessMsg(
+          `Queued Prestair WhatsApp reply + showcase image in background for ${lead.name || lead.phone}.`
+        );
+      }
+    } catch {
+      setSheetError('Network error while triggering WhatsApp message.');
+    } finally {
+      setResendingLeadId(null);
+    }
+  };
+
+  const handleSyncRtdbNow = async () => {
+    if (!adminToken) return;
+    setIsSyncingRtdb(true);
+    setSheetError(null);
+    setSheetSuccessMsg(null);
+    try {
+      const res = await fetch('/api/rtdb/sync-all', {
+        method: 'POST',
         headers: { Authorization: `Bearer ${adminToken}` },
       });
-      void deleteFirestoreLead(lead.leadId).catch(() => {});
+      const data = await res.json().catch(() => ({}));
+      if (data.rtdb) {
+        setRtdbStatus(data.rtdb as RtdbAdminStatus);
+      }
+      if (!res.ok) {
+        setSheetError(
+          data.error ||
+            'Firebase Realtime Database write denied. Paste the RTDB Rules into Firebase Console and click Publish.'
+        );
+      } else {
+        setSheetSuccessMsg(
+          `Verified & synced ${data.count ?? leads.length} leads to Google Realtime Database (prestier-final).`
+        );
+      }
     } catch {
-      // ignore
+      setSheetError('Network error while verifying Firebase Realtime Database.');
+    } finally {
+      setIsSyncingRtdb(false);
+    }
+  };
+
+  const handleDeleteLead = async (lead: LeadRecord) => {
+    deletedLeadIdsRef.current.add(lead.leadId);
+    setLeads((prev) => prev.filter((item) => item.leadId !== lead.leadId));
+
+    // If Admin deleted the currently open background draft on this tab, reset it so it never resurrects
+    if (lead.leadId === activeLeadId) {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      setForm(INITIAL_FORM);
+      setErrors({});
+      setActiveLeadId(generateLeadId());
+      setSessionToken(generateSessionToken());
+      setSyncState('idle');
+      setSubmittedLeadId(null);
+    }
+
+    void deleteRealtimeDbLead(lead.leadId);
+    void deleteFirestoreLead(lead.leadId).catch(() => {});
+
+    try {
+      const res = await fetch(`/api/leads/${encodeURIComponent(lead.leadId)}`, {
+        method: 'DELETE',
+        headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
+      });
+      if (res.status === 401) {
+        setAdminToken(null);
+        setAdminAuthError('Admin session expired. Please unlock Admin again.');
+        return;
+      }
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        registerDeletedIds(data.deletedIds);
+      }
+    } catch {
+      // ignore transient network error; local & cloud tombstones already applied
     }
   };
 
   return (
-    <div className="relative min-h-screen flex flex-col items-center justify-center overflow-x-hidden p-4 sm:p-6">
-      {/* Steel Manufacturing Full-Viewport Background Image with Measured Contrast Scrim */}
-      <div className="fixed inset-0 -z-10 bg-slate-950">
-        <img
-          src={STEEL_BG_SRC}
-          alt="Prestier System LLP Stainless Steel Manufacturing Facility"
-          referrerPolicy="no-referrer"
-          className="h-full w-full object-cover object-center opacity-45"
-        />
+    <div className="relative min-h-screen flex flex-col items-center justify-center overflow-x-hidden px-3 py-6 sm:p-6 bg-white text-slate-900">
+      {/* Clean Bright White Commercial Bakery & Food Service Showroom Background */}
+      <div className="fixed inset-0 -z-10 bg-white">
+        {!bgFailed ? (
+          <img
+            src={CLEAN_WHITE_BG_SRC}
+            alt="Prestier System LLP Clean White Bakery & Food Service Showroom"
+            referrerPolicy="no-referrer"
+            onError={() => setBgFailed(true)}
+            className="h-full w-full object-cover object-center"
+          />
+        ) : (
+          <div className="h-full w-full bg-gradient-to-br from-white via-slate-50 to-sky-50/40" />
+        )}
         <div
-          className="absolute inset-0 bg-gradient-to-b from-slate-950/85 via-slate-950/75 to-slate-950/95"
+          className="absolute inset-0 bg-gradient-to-b from-white/45 via-white/25 to-white/50"
           aria-hidden="true"
         />
       </div>
 
-      {/* Top-Right Corner Green Dot for Admin Login / Dashboard */}
-      <div className="fixed top-4 right-4 z-40">
+      {/* Top-Right Discreet Green Dot Admin Trigger */}
+      <div className="fixed top-3 right-3 sm:top-4 sm:right-4 z-40">
         <button
           type="button"
-          onClick={() => {
-            setIsAdminModalOpen(true);
-          }}
-          title="Admin Dashboard"
-          className="h-4 w-4 rounded-full bg-emerald-500 hover:bg-emerald-400 shadow-lg shadow-emerald-500/80 ring-2 ring-emerald-400/60 transition-all cursor-pointer block"
-          aria-label="Admin Dashboard"
-        />
+          onClick={handleOpenAdminModal}
+          className="group flex h-11 w-11 items-center justify-center rounded-full bg-transparent hover:bg-slate-900/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 transition-colors cursor-pointer"
+          aria-label="Protected Access"
+        >
+          <span
+            className="h-3 w-3 rounded-full bg-emerald-500 ring-2 ring-white shadow-sm group-hover:scale-110 transition-transform"
+            aria-hidden="true"
+          />
+        </button>
       </div>
 
-      {/* Home Page: ONLY the form and nothing else (no header, no live sheet, no core manufacturing divisions) */}
-      <main className="w-full max-w-xl my-auto">
+      {/* Centered Transparent Glass Customer Inquiry Form */}
+      <main className="w-full max-w-xl my-auto py-4 sm:py-8">
         <LeadCaptureForm
           form={form}
           errors={errors}
@@ -566,88 +867,254 @@ export default function App() {
         />
       </main>
 
-
-
-      {/* Admin Dashboard Modal (Containing Real-Time Google Sheets Table & WhatsApp Panel) */}
+      {/* Mobile-Friendly Password-Protected Admin Modal */}
       {isAdminModalOpen && (
         <div
           role="dialog"
           aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 overflow-y-auto"
+          aria-labelledby="admin-dashboard-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 backdrop-blur-xs p-0 sm:p-6 overflow-y-auto"
         >
-          <div className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-6">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
-                  <ShieldCheck className="h-5 w-5" />
+          {!adminToken ? (
+            /* Password / PIN Gate Card */
+            <div className="m-4 sm:my-auto w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-2xl space-y-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700 shrink-0">
+                    <Lock className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-sky-700">Prestier System LLP</p>
+                    <h2
+                      id="admin-dashboard-title"
+                      className="font-display text-lg font-bold text-slate-900"
+                    >
+                      {isPasscodeConfigured === false
+                        ? 'Set Admin Password'
+                        : 'Admin Password Required'}
+                    </h2>
+                  </div>
                 </div>
-                <div>
-                  <h2 className="font-display text-lg font-bold text-white">
-                    Prestier System LLP · Admin Dashboard
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Real-Time Google Sheets, Database Stream &amp; 24x7 WhatsApp Vault
+
+                <button
+                  type="button"
+                  onClick={handleCloseAdminModal}
+                  aria-label="Close password prompt"
+                  className="min-h-11 min-w-11 flex items-center justify-center -mr-2 -mt-1 rounded-lg text-slate-400 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {isCheckingAuthStatus ? (
+                <div className="py-6 flex items-center justify-center gap-2 text-xs text-slate-600">
+                  <Loader2 className="h-4 w-4 animate-spin text-sky-600" />
+                  <span>Checking admin security…</span>
+                </div>
+              ) : (
+                <form onSubmit={handleAdminAuthSubmit} className="space-y-4">
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {isPasscodeConfigured === false
+                      ? 'First-time setup: Set your 4-digit PIN or password once to lock Admin access and protect all customer data.'
+                      : 'Enter your Admin PIN / password to view customer leads and WhatsApp settings.'}
                   </p>
+
+                  <div>
+                    <label
+                      htmlFor="admin-pin-input"
+                      className="block text-xs font-semibold text-slate-800 mb-1.5"
+                    >
+                      {isPasscodeConfigured === false
+                        ? 'Create Admin PIN / Password'
+                        : 'Password / PIN'}
+                    </label>
+                    <input
+                      id="admin-pin-input"
+                      type="password"
+                      autoFocus
+                      autoComplete={
+                        isPasscodeConfigured === false ? 'new-password' : 'current-password'
+                      }
+                      value={adminPasscodeInput}
+                      onChange={(e) => {
+                        setAdminPasscodeInput(e.target.value);
+                        if (adminAuthError) setAdminAuthError(null);
+                      }}
+                      placeholder={
+                        isPasscodeConfigured === false
+                          ? 'Enter new PIN (min 4 characters)'
+                          : 'Enter admin password'
+                      }
+                      className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-base sm:text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600 focus:ring-3 focus:ring-sky-600/15 tabular-nums"
+                    />
+                  </div>
+
+                  {adminAuthError && (
+                    <p
+                      role="alert"
+                      className="text-xs font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2"
+                    >
+                      {adminAuthError}
+                    </p>
+                  )}
+
+                  <div className="grid grid-cols-2 sm:flex sm:items-center sm:justify-end gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleCloseAdminModal}
+                      className="min-h-11 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold px-4 py-2.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isUnlockingAdmin || !adminPasscodeInput.trim()}
+                      className="min-h-11 inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold px-5 py-2.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      {isUnlockingAdmin ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          <span>Verifying…</span>
+                        </>
+                      ) : (
+                        <span>
+                          {isPasscodeConfigured === false ? 'Set PIN & Open' : 'Unlock Admin'}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          ) : (
+            /* Unlocked Mobile-First & Full-Width Desktop Admin Workspace */
+            <div className="w-full h-dvh sm:h-auto sm:max-h-[92vh] max-w-7xl sm:my-auto rounded-none sm:rounded-2xl border-0 sm:border border-slate-200 bg-slate-50 shadow-2xl overflow-hidden flex flex-col">
+              {/* Compact Mobile-Responsive Admin Top Bar */}
+              <div className="border-b border-slate-200 bg-white px-4 sm:px-6 py-3 sm:py-4 shrink-0 space-y-2.5 sm:space-y-0 sm:flex sm:items-center sm:justify-between sm:gap-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] sm:text-xs font-semibold text-sky-700 truncate">
+                      Food service equipment
+                    </p>
+                    <h2
+                      id="admin-dashboard-title"
+                      className="font-display text-base sm:text-lg font-bold text-slate-900 truncate"
+                    >
+                      Prestier System LLP · Admin
+                    </h2>
+                  </div>
+
+                  {/* Mobile Close / Lock Button */}
+                  <button
+                    type="button"
+                    onClick={handleCloseAdminModal}
+                    aria-label="Lock and close Admin Dashboard"
+                    className="sm:hidden min-h-11 min-w-11 flex items-center justify-center -mr-2 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                {/* Responsive Segmented Workspace Tabs + Desktop Close */}
+                <div className="flex items-center gap-3">
+                  <div
+                    role="tablist"
+                    aria-label="Admin workspace sections"
+                    className="grid grid-cols-3 sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200 w-full sm:w-auto"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={adminTab === 'leads'}
+                      onClick={() => setAdminTab('leads')}
+                      className={`min-h-10 inline-flex items-center justify-center gap-1.5 px-2 sm:px-3.5 py-2 sm:py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        adminTab === 'leads'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <FileSpreadsheet className="hidden sm:block h-3.5 w-3.5 text-sky-700 shrink-0" />
+                      <span className="tabular-nums">Leads ({leads.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={adminTab === 'sheets'}
+                      onClick={() => setAdminTab('sheets')}
+                      className={`min-h-10 inline-flex items-center justify-center gap-1.5 px-2 sm:px-3.5 py-2 sm:py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        adminTab === 'sheets'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <FileSpreadsheet className="hidden sm:block h-3.5 w-3.5 text-emerald-700 shrink-0" />
+                      <span>Sheet Script</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={adminTab === 'whatsapp'}
+                      onClick={() => setAdminTab('whatsapp')}
+                      className={`min-h-10 inline-flex items-center justify-center gap-1.5 px-2 sm:px-3.5 py-2 sm:py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        adminTab === 'whatsapp'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <MessageCircle className="hidden sm:block h-3.5 w-3.5 text-emerald-700 shrink-0" />
+                      <span>WhatsApp</span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleCloseAdminModal}
+                    aria-label="Lock and close Admin Dashboard"
+                    className="hidden sm:flex min-h-10 min-w-10 items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsAdminModalOpen(false)}
-                className="rounded-lg p-2 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
 
-            <div className="space-y-8">
-              {/* Live Google Sheet & Leads Table */}
-              <LiveGoogleSheetTable
-                leads={leads}
-                activeDraftId={activeLeadId}
-                googleUserEmail={googleUserEmail}
-                connectedSheet={connectedSheet}
-                isSigningInGoogle={isSigningInGoogle}
-                isSyncingSheet={isSyncingSheet}
-                sheetError={sheetError}
-                sheetSuccessMsg={sheetSuccessMsg}
-                isAdminAuthenticated={Boolean(adminToken)}
-                onGoogleSignIn={handleGoogleSignIn}
-                onCreateNewGoogleSheet={handleCreateNewGoogleSheet}
-                onConnectExistingSheet={handleConnectExistingSheet}
-                onSyncAllToSheet={handleSyncAllToSheet}
-                onDeleteLead={handleDeleteLead}
-              />
-
-              {/* 24x7 WhatsApp Sidebar/Vault Embedded Controls */}
-              <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-6 space-y-4">
-                <h3 className="font-display text-base font-bold text-white flex items-center gap-2">
-                  <MessageCircle className="h-5 w-5 text-amber-400" />
-                  <span>24x7 Persistent WhatsApp Vault &amp; Automation</span>
-                </h3>
-                <HiddenWhatsAppSidebar
-                  isOpen={true}
-                  adminToken={adminToken}
-                  isConfigured={isAdminConfigured}
-                  onOpenTrigger={() => {}}
-                  onClose={() => setIsAdminModalOpen(false)}
-                  onAdminAuthenticated={(token) => {
-                    setAdminToken(token);
-                    setIsAdminConfigured(true);
-                  }}
-                  onAdminLogout={async () => {
-                    if (adminToken) {
-                      await fetch('/api/admin/logout', {
-                        method: 'POST',
-                        headers: { Authorization: `Bearer ${adminToken}` },
-                      }).catch(() => {});
-                    }
-                    setAdminToken(null);
-                    setIsAdminModalOpen(false);
-                  }}
-                />
+              {/* Admin Content Viewport */}
+              <div className="p-3 sm:p-6 overflow-y-auto flex-1 overscroll-contain">
+                {adminTab === 'leads' ? (
+                  <LiveGoogleSheetTable
+                    leads={leads}
+                    activeDraftId={activeLeadId}
+                    googleUserEmail={googleUserEmail}
+                    connectedSheet={connectedSheet}
+                    rtdbStatus={rtdbStatus}
+                    isSigningInGoogle={isSigningInGoogle}
+                    isSyncingSheet={isSyncingSheet}
+                    isSyncingRtdb={isSyncingRtdb}
+                    isRefreshingLeads={isRefreshingLeads}
+                    resendingLeadId={resendingLeadId}
+                    sheetError={sheetError}
+                    sheetSuccessMsg={sheetSuccessMsg}
+                    isAdminAuthenticated={true}
+                    onRefreshLeads={() => void fetchInitialLeads(adminToken)}
+                    onSyncRtdbNow={() => void handleSyncRtdbNow()}
+                    onResendWhatsApp={handleResendWhatsApp}
+                    onGoogleSignIn={handleGoogleSignIn}
+                    onCreateNewGoogleSheet={handleCreateNewGoogleSheet}
+                    onConnectExistingSheet={handleConnectExistingSheet}
+                    onSyncAllToSheet={handleSyncAllToSheet}
+                    onDeleteLead={handleDeleteLead}
+                    onOpenAppsScriptSetup={() => setAdminTab('sheets')}
+                  />
+                ) : adminTab === 'sheets' ? (
+                  <GoogleSheetAppsScriptPanel
+                    adminToken={adminToken}
+                    onSyncComplete={() => void fetchInitialLeads(adminToken)}
+                  />
+                ) : (
+                  <HiddenWhatsAppSidebar adminToken={adminToken} />
+                )}
               </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

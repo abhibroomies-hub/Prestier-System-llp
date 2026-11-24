@@ -11,10 +11,9 @@ export interface LeadFormInput {
   productInterest: string[];
 }
 
-export interface LeadRecord extends Omit<LeadFormInput, 'productInterest'> {
+export interface LeadRecord extends LeadFormInput {
   leadId: string;
   sessionToken?: string;
-  productInterest: string[];
   status: LeadStatus;
   whatsappSent: boolean;
   sheetSynced: boolean;
@@ -22,6 +21,25 @@ export interface LeadRecord extends Omit<LeadFormInput, 'productInterest'> {
   createdAt: string;
   updatedAt: string;
 }
+
+export const DEFAULT_PRESTAIR_WHATSAPP_REPLY = [
+  'Thank you for your inquiry! 😊',
+  'We appreciate your interest in our bakery solutions.',
+  '',
+  'Please let us know your exact requirements so that our team can understand your needs and get back to you with the most suitable solutions.',
+  '',
+  'Meanwhile, follow us on Instagram to explore our latest products, innovative designs, and updates.',
+  '',
+  '📲 instagram.com/prestairsystem',
+  '',
+  'Looking forward to connecting with you!',
+  '',
+  'Team Prestair',
+].join('\n');
+
+export const PRESTAIR_REPLY_IMAGES = [
+  '/assets/aistudio/image_667a0296.png',
+] as const;
 
 export const PRODUCT_OPTIONS: ReadonlyArray<{
   value: string;
@@ -34,7 +52,7 @@ export const PRODUCT_OPTIONS: ReadonlyArray<{
     value: 'Display Cabinet',
     label: 'Display Cabinet',
     shortLabel: 'Display Cabinet',
-    description: 'Precision stainless steel refrigerated & dry retail display showcases',
+    description: 'Precision stainless steel refrigerated & dry bakery display showcases',
     accentKey: 'sky',
   },
   {
@@ -77,14 +95,33 @@ export function sanitizeField(value: unknown, maxLength: number): string {
   return value.replace(/\r\n/g, ' ').replace(/\n/g, ' ').trim().slice(0, maxLength);
 }
 
-export function sanitizeLeadInput(raw: Partial<LeadFormInput>): LeadFormInput {
-  let rawInterests: string[] = [];
-  if (Array.isArray(raw.productInterest)) {
-    rawInterests = raw.productInterest.filter((item): item is string => typeof item === 'string' && VALID_PRODUCT_INTERESTS.has(item));
-  } else if (typeof raw.productInterest === 'string' && raw.productInterest.trim()) {
-    rawInterests = raw.productInterest.split(',').map((s) => s.trim()).filter((s) => VALID_PRODUCT_INTERESTS.has(s));
+export function normalizeProductInterests(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    const unique = new Set<string>();
+    for (const item of raw) {
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        if (VALID_PRODUCT_INTERESTS.has(trimmed)) {
+          unique.add(trimmed);
+        }
+      }
+    }
+    return Array.from(unique);
   }
+  if (typeof raw === 'string' && raw.trim()) {
+    const unique = new Set<string>();
+    for (const part of raw.split(',')) {
+      const trimmed = part.trim();
+      if (VALID_PRODUCT_INTERESTS.has(trimmed)) {
+        unique.add(trimmed);
+      }
+    }
+    return Array.from(unique);
+  }
+  return [];
+}
 
+export function sanitizeLeadInput(raw: Partial<Record<keyof LeadFormInput, unknown>>): LeadFormInput {
   return {
     name: sanitizeField(raw.name, LEAD_FIELD_LIMITS.name),
     designation: sanitizeField(raw.designation, LEAD_FIELD_LIMITS.designation),
@@ -93,15 +130,44 @@ export function sanitizeLeadInput(raw: Partial<LeadFormInput>): LeadFormInput {
     city: sanitizeField(raw.city, LEAD_FIELD_LIMITS.city),
     emailAddress: sanitizeField(raw.emailAddress, LEAD_FIELD_LIMITS.emailAddress),
     outletsCount: sanitizeField(raw.outletsCount, LEAD_FIELD_LIMITS.outletsCount),
-    productInterest: rawInterests,
+    productInterest: normalizeProductInterests(raw.productInterest),
+  };
+}
+
+export function normalizeLeadRecord(raw: unknown): LeadRecord {
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const sanitized = sanitizeLeadInput(obj);
+  const nowIso = new Date().toISOString();
+  const rawLeadId = sanitizeField(obj.leadId, LEAD_FIELD_LIMITS.leadId);
+  return {
+    leadId: rawLeadId || generateLeadId(),
+    ...(typeof obj.sessionToken === 'string' && obj.sessionToken
+      ? { sessionToken: sanitizeField(obj.sessionToken, LEAD_FIELD_LIMITS.sessionToken) }
+      : {}),
+    name: sanitized.name,
+    designation: sanitized.designation,
+    phone: sanitized.phone,
+    companyName: sanitized.companyName,
+    city: sanitized.city,
+    emailAddress: sanitized.emailAddress,
+    outletsCount: sanitized.outletsCount,
+    productInterest: sanitized.productInterest,
+    status: obj.status === 'confirmed' ? 'confirmed' : 'partial',
+    whatsappSent: Boolean(obj.whatsappSent),
+    sheetSynced: Boolean(obj.sheetSynced),
+    sheetRowNumber: typeof obj.sheetRowNumber === 'number' ? obj.sheetRowNumber : null,
+    createdAt: typeof obj.createdAt === 'string' && obj.createdAt ? obj.createdAt : nowIso,
+    updatedAt: typeof obj.updatedAt === 'string' && obj.updatedAt ? obj.updatedAt : nowIso,
   };
 }
 
 export function hasAnyLeadContent(input: LeadFormInput): boolean {
+  const phoneDigits = input.phone.replace(/\D/g, '');
+  const hasRealPhone = phoneDigits.length > 0 && phoneDigits !== '91';
   return Boolean(
     input.name.trim() ||
       input.designation.trim() ||
-      input.phone.trim() ||
+      hasRealPhone ||
       input.companyName.trim() ||
       input.city.trim() ||
       input.emailAddress.trim() ||
@@ -127,48 +193,189 @@ export interface ValidationResult {
   errors: Partial<Record<keyof LeadFormInput, string>>;
 }
 
-export function validateLeadForSubmit(input: LeadFormInput): ValidationResult {
-  const errors: Partial<Record<keyof LeadFormInput, string>> = {};
-
-  if (!input.name.trim() || input.name.trim().length < 2) {
-    errors.name = 'Please enter your full name.';
-  }
-
-  if (!input.designation.trim()) {
-    errors.designation = 'Please enter your designation (e.g. Director, Store Manager).';
-  }
-
-  const digits = input.phone.replace(/\D/g, '');
-  if (digits.length < 10 || digits.length > 15) {
-    errors.phone = 'Enter a valid 10–15 digit phone / WhatsApp number.';
-  }
-
-  if (!input.companyName.trim()) {
-    errors.companyName = 'Please enter your company or store name.';
-  }
-
-  if (!input.city.trim()) {
-    errors.city = 'Please enter your city.';
-  }
-
-  if (!input.emailAddress.trim() || !input.emailAddress.includes('@')) {
-    errors.emailAddress = 'Enter a valid email address.';
-  }
-
-  const outletsNum = Number(input.outletsCount.trim());
-  if (!input.outletsCount.trim() || !Number.isFinite(outletsNum) || outletsNum < 1 || outletsNum > 100000) {
-    errors.outletsCount = 'Enter the number of outlets (at least 1).';
-  }
-
-  if (!Array.isArray(input.productInterest) || input.productInterest.length === 0) {
-    errors.productInterest = 'Select at least one equipment category.';
-  }
-
+export function validateLeadForSubmit(_input: LeadFormInput): ValidationResult {
+  // All customer inquiry fields are optional; nothing is compulsory to fill.
   return {
-    valid: Object.keys(errors).length === 0,
-    errors,
+    valid: true,
+    errors: {},
   };
 }
+
+export const GOOGLE_APPS_SCRIPT_CODE = `/**
+ * Prestier System LLP — 24x7 Live Google Sheets Sync (Apps Script)
+ *
+ * Setup Steps:
+ * 1. Open your Google Sheet -> Extensions -> Apps Script
+ * 2. Delete existing code, paste this entire script, and press Ctrl+S (Save)
+ * 3. Click "Deploy" -> "New deployment"
+ * 4. Select type: "Web app"
+ *    - Description: Prestier Live Leads Sync
+ *    - Execute as: "Me"
+ *    - Who has access: "Anyone"
+ * 5. Click "Deploy", authorize access, copy the Web App URL (ends with /exec),
+ *    and paste it inside the Prestier Admin -> Google Sheet Sync tab.
+ */
+
+var SHEET_NAME = 'Prestier Leads';
+var HEADERS = [
+  'Lead ID',
+  'Status',
+  'Full Name',
+  'Designation',
+  'Phone Number',
+  'Company Name',
+  'City',
+  'Email Address',
+  'No. of Outlets',
+  'Equipment Requirements',
+  'WhatsApp Sent',
+  'Captured At',
+  'Last Updated'
+];
+
+function getOrCreateLeadSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+  }
+  if (sheet.getLastRow() === 0) {
+    var headerRange = sheet.getRange(1, 1, 1, HEADERS.length);
+    headerRange.setValues([HEADERS]);
+    headerRange.setFontWeight('bold');
+    headerRange.setBackground('#0F172A');
+    headerRange.setFontColor('#FFFFFF');
+    sheet.setFrozenRows(1);
+  }
+  return { ss: ss, sheet: sheet };
+}
+
+function normalizeRowValues_(row) {
+  var out = [];
+  for (var i = 0; i < HEADERS.length; i++) {
+    var val = row && i < row.length && row[i] !== null && row[i] !== undefined ? String(row[i]) : '—';
+    out.push(val);
+  }
+  return out;
+}
+
+function upsertRows_(sheet, rows) {
+  if (!rows || !rows.length) return 0;
+
+  var lastRow = sheet.getLastRow();
+  var idToRow = {};
+
+  if (lastRow >= 2) {
+    var existingIds = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var r = 0; r < existingIds.length; r++) {
+      var id = String(existingIds[r][0] || '').trim();
+      if (id) {
+        idToRow[id] = r + 2;
+      }
+    }
+  }
+
+  var rowsToAppend = [];
+  var processed = 0;
+
+  for (var i = 0; i < rows.length; i++) {
+    var cleanRow = normalizeRowValues_(rows[i]);
+    var leadId = String(cleanRow[0] || '').trim();
+    if (!leadId) continue;
+
+    var targetRow = idToRow[leadId];
+    if (targetRow) {
+      var updateRange = sheet.getRange(targetRow, 1, 1, HEADERS.length);
+      updateRange.setNumberFormat('@');
+      updateRange.setValues([cleanRow]);
+    } else {
+      rowsToAppend.push(cleanRow);
+      idToRow[leadId] = lastRow + rowsToAppend.length;
+    }
+    processed++;
+  }
+
+  if (rowsToAppend.length > 0) {
+    var startRow = sheet.getLastRow() + 1;
+    var appendRange = sheet.getRange(startRow, 1, rowsToAppend.length, HEADERS.length);
+    appendRange.setNumberFormat('@');
+    appendRange.setValues(rowsToAppend);
+  }
+
+  return processed;
+}
+
+function deleteRowByLeadId_(sheet, targetLeadId) {
+  var id = String(targetLeadId || '').trim();
+  if (!id) return 0;
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return 0;
+  var ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var deleted = 0;
+  for (var i = ids.length - 1; i >= 0; i--) {
+    if (String(ids[i][0] || '').trim() === id) {
+      sheet.deleteRow(i + 2);
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
+function doGet() {
+  var info = getOrCreateLeadSheet_();
+  return ContentService.createTextOutput(
+    JSON.stringify({
+      ok: true,
+      service: 'Prestier System LLP Live Sheet Sync',
+      spreadsheetName: info.ss.getName(),
+      sheetName: info.sheet.getName(),
+      totalRows: Math.max(0, info.sheet.getLastRow() - 1)
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var raw = e && e.postData && e.postData.contents ? e.postData.contents : '{}';
+    var payload = JSON.parse(raw);
+    var info = getOrCreateLeadSheet_();
+    var sheet = info.sheet;
+    var synced = 0;
+
+    if (payload.action === 'bulk_sync' && Array.isArray(payload.rows)) {
+      synced = upsertRows_(sheet, payload.rows);
+    } else if (payload.action === 'upsert' && Array.isArray(payload.row)) {
+      synced = upsertRows_(sheet, [payload.row]);
+    } else if (payload.action === 'delete' && payload.leadId) {
+      synced = deleteRowByLeadId_(sheet, payload.leadId);
+    } else if (payload.action === 'ping') {
+      synced = 0;
+    }
+
+    return ContentService.createTextOutput(
+      JSON.stringify({
+        ok: true,
+        synced: synced,
+        spreadsheetName: info.ss.getName(),
+        sheetName: sheet.getName(),
+        spreadsheetUrl: info.ss.getUrl(),
+        totalRows: Math.max(0, sheet.getLastRow() - 1)
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(
+      JSON.stringify({
+        ok: false,
+        error: String(err && err.message ? err.message : err)
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+`;
 
 export function generateLeadId(): string {
   const ts = Date.now().toString(36);
@@ -187,16 +394,15 @@ export function buildWhatsAppConfirmationMessage(
   lead: LeadFormInput,
   customTemplate?: string
 ): string {
-  const interestsStr = Array.isArray(lead.productInterest) && lead.productInterest.length > 0
-    ? lead.productInterest.join(', ')
-    : 'Food service equipment';
+  const interestsStr =
+    Array.isArray(lead.productInterest) && lead.productInterest.length > 0
+      ? lead.productInterest.join(', ')
+      : 'Food service equipment';
 
   const template =
     customTemplate && customTemplate.trim().length > 0
       ? customTemplate
-      : [
-          'Thank you for your inquiry! 😊 We appreciate your interest in our bakery solutions. Please let us know your exact requirements so that our team can understand your needs and get back to you with the most suitable solutions. Meanwhile, follow us on Instagram to explore our latest products, innovative designs, and updates. 📲 instagram.com/prestairsystem Looking forward to connecting with you! Team Prestair',
-        ].join('\n');
+      : DEFAULT_PRESTAIR_WHATSAPP_REPLY;
 
   return template
     .replace(/\{\{name\}\}/g, lead.name || 'Valued Partner')
@@ -235,21 +441,25 @@ export const SHEET_HEADERS = [
 ] as const;
 
 export function formatLeadForSheetRow(lead: LeadRecord): string[] {
-  const interestsStr = Array.isArray(lead.productInterest) ? lead.productInterest.join(', ') : (lead.productInterest || '—');
+  const normalized = normalizeLeadRecord(lead);
+  const interestsStr =
+    normalized.productInterest.length > 0
+      ? normalized.productInterest.join(', ')
+      : 'Pending Selection';
   return [
-    lead.leadId,
-    lead.status === 'confirmed' ? 'CONFIRMED' : 'PARTIAL (LIVE DRAFT)',
-    lead.name || '—',
-    lead.designation || '—',
-    lead.phone || '—',
-    lead.companyName || '—',
-    lead.city || '—',
-    lead.emailAddress || '—',
-    lead.outletsCount || '—',
+    normalized.leadId,
+    normalized.status === 'confirmed' ? 'CONFIRMED' : 'PARTIAL (LIVE DRAFT)',
+    normalized.name || '—',
+    normalized.designation || '—',
+    normalized.phone || '—',
+    normalized.companyName || '—',
+    normalized.city || '—',
+    normalized.emailAddress || '—',
+    normalized.outletsCount || '—',
     interestsStr,
-    lead.whatsappSent ? 'Yes' : 'Pending',
-    formatReadableTimestamp(lead.createdAt),
-    formatReadableTimestamp(lead.updatedAt),
+    normalized.whatsappSent ? 'Yes' : 'Pending',
+    formatReadableTimestamp(normalized.createdAt),
+    formatReadableTimestamp(normalized.updatedAt),
   ];
 }
 
