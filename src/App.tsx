@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
+  Lock,
   MessageCircle,
   ShieldCheck,
   X,
@@ -72,9 +73,25 @@ export default function App() {
   const [sheetSuccessMsg, setSheetSuccessMsg] = useState<string | null>(null);
 
   // Admin & Modals State
-  const [adminToken, setAdminToken] = useState<string | null>(null);
-  const [isAdminConfigured, setIsAdminConfigured] = useState(false);
+  const [adminToken, setAdminToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('prestier_admin_token') || null;
+    } catch {
+      return null;
+    }
+  });
+  const [isAdminConfigured, setIsAdminConfigured] = useState(true);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (adminToken) {
+        localStorage.setItem('prestier_admin_token', adminToken);
+      } else {
+        localStorage.removeItem('prestier_admin_token');
+      }
+    } catch {}
+  }, [adminToken]);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectedSheetRef = useRef<ConnectedSpreadsheet | null>(null);
@@ -176,20 +193,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // Auto-authenticate admin on mount so WhatsApp sidebar & admin vault open instantly without setup prompts
-    fetch('/api/admin/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: '5060' }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.token) {
-          setAdminToken(data.token);
-          setIsAdminConfigured(true);
-        }
-      })
-      .catch(() => {});
     void checkAdminStatus(adminToken);
   }, [adminToken, checkAdminStatus]);
 

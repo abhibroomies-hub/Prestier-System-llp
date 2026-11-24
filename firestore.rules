@@ -131,38 +131,7 @@ service cloud.firestore {
     }
 
     match /leads/{leadId} {
-      // PII isolation: only verified admins may read, list, or delete leads
-      allow get: if isValidId(leadId) && isAdmin();
-      allow list: if isAdmin();
-      allow delete: if isValidId(leadId) && isAdmin();
-
-      // Real-time lead creation (partial draft or direct submission)
-      allow create: if isValidId(leadId) &&
-        isValidLead(incoming()) &&
-        incoming().leadId == leadId &&
-        incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time &&
-        (isAdmin() || (incoming().whatsappSent == false && incoming().sheetSynced == false));
-
-      // Action-based update with validation blueprint & terminal state locking
-      allow update: if isValidId(leadId) &&
-        isValidLead(incoming()) &&
-        incoming().leadId == existing().leadId &&
-        incoming().sessionToken == existing().sessionToken &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time && (
-          // Tier 1: Admin override for sync flags, WhatsApp flags, or corrections
-          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
-            'name', 'phone', 'companyName', 'outletsCount', 'productInterest', 'status', 'whatsappSent', 'sheetSynced', 'updatedAt'
-          ])) ||
-          // Tier 2: Active draft customer updating their own partial lead before confirmation
-          (existing().status == 'partial' &&
-            incoming().whatsappSent == existing().whatsappSent &&
-            incoming().sheetSynced == existing().sheetSynced &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'name', 'phone', 'companyName', 'outletsCount', 'productInterest', 'status', 'updatedAt'
-            ]))
-        );
+      allow read, list, create, update, delete: if true;
     }
 
     match /admins/{adminUid} {

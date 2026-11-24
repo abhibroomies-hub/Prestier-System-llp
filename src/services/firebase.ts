@@ -209,7 +209,7 @@ export function subscribeAdminFirestoreLeads(
   onError?: (err: Error) => void
 ): Unsubscribe {
   const path = 'leads';
-  const q = query(collection(db, path), orderBy('updatedAt', 'desc'));
+  const q = query(collection(db, path));
   return onSnapshot(
     q,
     (snapshot) => {
@@ -235,6 +235,7 @@ export function subscribeAdminFirestoreLeads(
           updatedAt: toIso(d.updatedAt),
         };
       });
+      records.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
       onUpdate(records);
     },
     (error) => {

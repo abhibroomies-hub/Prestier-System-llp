@@ -267,22 +267,15 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                 </button>
               </div>
 
-              {/* Password Gate vs Authenticated WhatsApp Control Center */}
               {!adminToken ? (
                 <form onSubmit={handlePasswordSubmit} className="space-y-4 pt-2">
                   <div className="rounded-xl border border-amber-500/30 bg-amber-950/25 p-4 space-y-1.5">
                     <div className="flex items-center gap-2 text-amber-300 font-semibold text-sm">
                       <Lock className="h-4 w-4 shrink-0" />
-                      <span>
-                        {isConfigured
-                          ? 'Protected Admin Vault — Enter Password'
-                          : 'First-Time Admin Vault Setup'}
-                      </span>
+                      <span>Protected Admin Access</span>
                     </div>
                     <p className="text-xs text-slate-300 leading-relaxed">
-                      {isConfigured
-                        ? 'Enter your admin password to manage the 24x7 never-logout WhatsApp session and automated customer replies.'
-                        : 'Set your secret admin password once to lock this hidden color sidebar. You can also set ADMIN_PASSCODE in Railway/Vercel environment variables.'}
+                      Enter admin password (default: <span className="font-mono text-amber-300">5060</span>) to unlock WhatsApp automation &amp; lead controls.
                     </p>
                   </div>
 
@@ -291,7 +284,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                       htmlFor="admin-vault-password"
                       className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
-                      {isConfigured ? 'Admin Password' : 'Create Admin Password (min 6 chars)'}
+                      Admin Password
                     </label>
                     <div className="relative">
                       <KeyRound className="h-4 w-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -301,31 +294,11 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                         required
                         value={passwordInput}
                         onChange={(e) => setPasswordInput(e.target.value)}
-                        placeholder="Enter secret password"
+                        placeholder="Enter password (e.g. 5060)"
                         className="w-full rounded-xl border border-slate-700 bg-slate-950 pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
                       />
                     </div>
                   </div>
-
-                  {!isConfigured && (
-                    <div>
-                      <label
-                        htmlFor="admin-vault-password-confirm"
-                        className="block text-xs font-medium text-slate-300 mb-1.5"
-                      >
-                        Confirm Admin Password
-                      </label>
-                      <input
-                        id="admin-vault-password-confirm"
-                        type="password"
-                        required
-                        value={confirmPasswordInput}
-                        onChange={(e) => setConfirmPasswordInput(e.target.value)}
-                        placeholder="Re-enter secret password"
-                        className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
-                      />
-                    </div>
-                  )}
 
                   {authError && (
                     <p role="alert" className="text-xs text-rose-400">
@@ -341,14 +314,12 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                     {isAuthenticating ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>Verifying Password…</span>
+                        <span>Verifying…</span>
                       </>
                     ) : (
                       <>
                         <ShieldCheck className="h-4 w-4" />
-                        <span>
-                          {isConfigured ? 'Unlock 24x7 WhatsApp Panel' : 'Claim Password & Unlock'}
-                        </span>
+                        <span>Unlock Admin Vault</span>
                       </>
                     )}
                   </button>

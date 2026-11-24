@@ -8,6 +8,9 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Mail,
+  MapPin,
+  Briefcase,
 } from 'lucide-react';
 import {
   computeLeadMetrics,
@@ -62,11 +65,15 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
     if (filterStatus !== 'all' && lead.status !== filterStatus) return false;
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
+    const interestsStr = Array.isArray(lead.productInterest) ? lead.productInterest.join(' ') : lead.productInterest;
     return (
       lead.name.toLowerCase().includes(q) ||
+      lead.designation.toLowerCase().includes(q) ||
       lead.phone.toLowerCase().includes(q) ||
       lead.companyName.toLowerCase().includes(q) ||
-      lead.productInterest.toLowerCase().includes(q) ||
+      lead.city.toLowerCase().includes(q) ||
+      lead.emailAddress.toLowerCase().includes(q) ||
+      interestsStr.toLowerCase().includes(q) ||
       lead.leadId.toLowerCase().includes(q)
     );
   });
@@ -85,21 +92,21 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
   return (
     <section
       aria-label="Live Google Sheet Lead Registry"
-      className="w-full rounded-2xl border border-slate-800 bg-slate-900/95 shadow-xl backdrop-blur-md overflow-hidden flex flex-col"
+      className="w-full rounded-2xl border border-slate-200 bg-white shadow-xl overflow-hidden flex flex-col"
     >
       {/* Top Spreadsheet Toolbar & Live Metrics */}
-      <div className="p-5 sm:p-6 border-b border-slate-800 space-y-4">
+      <div className="p-5 sm:p-6 border-b border-slate-200 space-y-4 bg-slate-50/50">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 text-xs text-emerald-400 font-medium">
+            <div className="flex items-center gap-2 text-xs text-emerald-700 font-semibold">
               <FileSpreadsheet className="h-4 w-4 shrink-0" />
               <span>Real-Time Google Sheets &amp; Database Stream</span>
             </div>
-            <h2 className="font-display text-lg sm:text-xl font-bold text-white mt-0.5">
-              Live Customer Lead Sheet (Partial &amp; Confirmed)
+            <h2 className="font-display text-lg sm:text-xl font-bold text-slate-900 mt-0.5">
+              Live Customer Lead Registry &amp; Admin Dashboard
             </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Captures leads automatically as customers type—even before they click Submit.
+            <p className="text-xs text-slate-600 mt-0.5">
+              Comprehensive customer inquiries with designation, company, city, email, and multi-product interests.
             </p>
           </div>
 
@@ -149,7 +156,7 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
                       type="button"
                       onClick={onCreateNewGoogleSheet}
                       disabled={isSyncingSheet}
-                      className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-semibold px-3.5 py-2.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-60 text-white text-xs font-semibold px-3.5 py-2.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
                     >
                       {isSyncingSheet ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -161,7 +168,7 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
                     <button
                       type="button"
                       onClick={() => setShowConnectExisting((prev) => !prev)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-3 py-2.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium px-3 py-2.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
                     >
                       <span>Link Existing Sheet ID</span>
                     </button>
@@ -172,9 +179,9 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
                       href={connectedSheet.spreadsheetUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-950/80 border border-emerald-500/40 hover:border-emerald-400 text-emerald-300 text-xs font-semibold px-3.5 py-2 transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 border border-emerald-300 hover:border-emerald-400 text-emerald-800 text-xs font-semibold px-3.5 py-2 transition-colors whitespace-nowrap shrink-0 shadow-sm"
                     >
-                      <FileSpreadsheet className="h-3.5 w-3.5" />
+                      <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-700" />
                       <span>Open Google Sheet ({connectedSheet.sheetName})</span>
                       <ExternalLink className="h-3 w-3" />
                     </a>
@@ -182,10 +189,10 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
                       type="button"
                       onClick={onSyncAllToSheet}
                       disabled={isSyncingSheet}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-3 py-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium px-3 py-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
                     >
                       <RefreshCw
-                        className={`h-3.5 w-3.5 ${isSyncingSheet ? 'animate-spin text-sky-400' : ''}`}
+                        className={`h-3.5 w-3.5 ${isSyncingSheet ? 'animate-spin text-sky-600' : ''}`}
                       />
                       <span>Sync All Rows</span>
                     </button>
@@ -197,7 +204,7 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
             <button
               type="button"
               onClick={handleDownloadCsv}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/90 hover:bg-slate-800 text-slate-200 text-xs font-medium px-3.5 py-2.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium px-3.5 py-2.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
             >
               <Download className="h-3.5 w-3.5" />
               <span>Download CSV</span>
@@ -207,14 +214,14 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
 
         {/* Connect Existing Spreadsheet Input Box */}
         {showConnectExisting && googleUserEmail && (
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
             <input
               type="text"
               value={sheetInputUrl}
               onChange={(e) => setSheetInputUrl(e.target.value)}
               placeholder="Paste Google Sheet URL or Spreadsheet ID..."
               aria-label="Google Sheet URL or Spreadsheet ID"
-              className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+              className="flex-1 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600"
             />
             <button
               type="button"
@@ -233,40 +240,40 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
 
         {/* Status notifications for Google Sheets */}
         {sheetError && (
-          <p role="alert" className="text-xs text-rose-400 bg-rose-950/40 border border-rose-500/30 rounded-lg px-3 py-2">
+          <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
             {sheetError}
           </p>
         )}
         {sheetSuccessMsg && (
-          <p role="status" className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-500/30 rounded-lg px-3 py-2 flex items-center gap-1.5">
-            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+          <p role="status" className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
             <span>{sheetSuccessMsg}</span>
           </p>
         )}
 
-        {/* Colorful Summary Metric Strip (Tabular Numerals) */}
+        {/* Summary Metric Strip */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
-          <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3.5 py-2.5">
-            <p className="text-xs text-slate-400">Total Live Rows</p>
-            <p className="font-mono text-xl font-bold text-white tabular-nums mt-0.5">
+          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+            <p className="text-xs text-slate-500 font-medium">Total Leads</p>
+            <p className="font-mono text-xl font-bold text-slate-900 tabular-nums mt-0.5">
               {metrics.total}
             </p>
           </div>
-          <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/25 px-3.5 py-2.5">
-            <p className="text-xs text-emerald-300/90">Confirmed Leads</p>
-            <p className="font-mono text-xl font-bold text-emerald-300 tabular-nums mt-0.5">
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3.5 shadow-sm">
+            <p className="text-xs text-emerald-800 font-medium">Confirmed Leads</p>
+            <p className="font-mono text-xl font-bold text-emerald-700 tabular-nums mt-0.5">
               {metrics.confirmed}
             </p>
           </div>
-          <div className="rounded-xl border border-amber-500/25 bg-amber-950/25 px-3.5 py-2.5">
-            <p className="text-xs text-amber-300/90">Auto-Saved Partial Drafts</p>
-            <p className="font-mono text-xl font-bold text-amber-300 tabular-nums mt-0.5">
+          <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3.5 shadow-sm">
+            <p className="text-xs text-amber-800 font-medium">Auto-Saved Drafts</p>
+            <p className="font-mono text-xl font-bold text-amber-700 tabular-nums mt-0.5">
               {metrics.partial}
             </p>
           </div>
-          <div className="rounded-xl border border-sky-500/25 bg-sky-950/25 px-3.5 py-2.5">
-            <p className="text-xs text-sky-300/90">WhatsApp Dispatched</p>
-            <p className="font-mono text-xl font-bold text-sky-300 tabular-nums mt-0.5">
+          <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3.5 shadow-sm">
+            <p className="text-xs text-sky-800 font-medium">WhatsApp Dispatched</p>
+            <p className="font-mono text-xl font-bold text-sky-700 tabular-nums mt-0.5">
               {metrics.whatsappSent}
             </p>
           </div>
@@ -274,30 +281,29 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
 
         {/* Filter Bar & Search */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-          {/* Interactive Segmented Filter Buttons */}
           <div
             role="group"
             aria-label="Filter leads by status"
-            className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 self-start"
+            className="inline-flex items-center gap-1 p-1 rounded-xl bg-white border border-slate-200 shadow-sm self-start"
           >
             <button
               type="button"
               onClick={() => setFilterStatus('all')}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 filterStatus === 'all'
-                  ? 'bg-sky-600 text-white'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-sky-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              All Rows ({metrics.total})
+              All Leads ({metrics.total})
             </button>
             <button
               type="button"
               onClick={() => setFilterStatus('confirmed')}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 filterStatus === 'confirmed'
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               Confirmed ({metrics.confirmed})
@@ -307,53 +313,52 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
               onClick={() => setFilterStatus('partial')}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 filterStatus === 'partial'
-                  ? 'bg-amber-600 text-white'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-amber-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Partial Auto-Saved ({metrics.partial})
+              Partial Drafts ({metrics.partial})
             </button>
           </div>
 
-          <div className="relative w-full sm:w-64">
-            <Search className="h-3.5 w-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <div className="relative w-full sm:w-72">
+            <Search className="h-3.5 w-3.5 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search name, phone, company..."
+              placeholder="Search name, designation, company, city..."
               aria-label="Search leads"
-              className="w-full rounded-xl border border-slate-800 bg-slate-950/90 pl-8 pr-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+              className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600 shadow-sm"
             />
           </div>
         </div>
       </div>
 
-      {/* Colorful Spreadsheet-Style Data Table */}
+      {/* Spreadsheet Data Table */}
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold text-slate-300 tracking-wide">
-              <th className="py-2.5 pl-3.5 pr-1.5 font-mono">#</th>
-              <th className="py-2.5 px-2.5">Status</th>
-              <th className="py-2.5 px-2.5">Customer</th>
-              <th className="py-2.5 px-2.5">Phone / WhatsApp</th>
-              <th className="py-2.5 px-2.5">Company</th>
-              <th className="py-2.5 px-2 text-right">Outlets</th>
-              <th className="py-2.5 px-2.5">Production</th>
-              <th className="py-2.5 pl-2 pr-3.5">Updated</th>
-              {isAdminAuthenticated && <th className="py-2.5 pl-1.5 pr-3.5 text-right">Action</th>}
+            <tr className="border-b border-slate-200 bg-slate-100 text-[11px] font-bold text-slate-700 tracking-wider uppercase">
+              <th className="py-3 pl-4 pr-2 font-mono">#</th>
+              <th className="py-3 px-3">Status</th>
+              <th className="py-3 px-3">Customer &amp; Designation</th>
+              <th className="py-3 px-3">Contact (Phone &amp; Email)</th>
+              <th className="py-3 px-3">Company &amp; City</th>
+              <th className="py-3 px-2 text-right">Outlets</th>
+              <th className="py-3 px-3">Equipment Interest</th>
+              <th className="py-3 pl-2 pr-4">Updated</th>
+              {isAdminAuthenticated && <th className="py-3 pl-2 pr-4 text-right">Action</th>}
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/80 text-xs">
+          <tbody className="divide-y divide-slate-200 text-xs text-slate-800">
             {filteredLeads.length === 0 ? (
               <tr>
                 <td
                   colSpan={isAdminAuthenticated ? 9 : 8}
-                  className="py-10 px-6 text-center text-slate-400"
+                  className="py-12 px-6 text-center text-slate-500"
                 >
-                  No lead rows match your current filter. Start typing in the form to see instant
-                  live spreadsheet capture.
+                  No leads match your search or filter. New submissions will appear here instantly.
                 </td>
               </tr>
             ) : (
@@ -362,63 +367,82 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
                 const isConfirmed = lead.status === 'confirmed';
 
                 const rowBg = isCurrentDraft
-                  ? 'bg-amber-500/10 hover:bg-amber-500/15'
+                  ? 'bg-amber-50/80 hover:bg-amber-100/60'
                   : isConfirmed
-                    ? 'bg-emerald-500/[0.04] hover:bg-emerald-500/[0.08]'
-                    : 'bg-amber-500/[0.04] hover:bg-amber-500/[0.08]';
+                    ? 'bg-white hover:bg-slate-50'
+                    : 'bg-amber-50/40 hover:bg-amber-50/80';
 
-                const productColor =
-                  lead.productInterest === 'Display Cabinet'
-                    ? 'text-sky-300 font-semibold'
-                    : lead.productInterest === 'Electronic Shelf Label'
-                      ? 'text-emerald-300 font-semibold'
-                      : lead.productInterest === 'Degree-In Equipment'
-                        ? 'text-amber-300 font-semibold'
-                        : 'text-slate-500 italic';
+                const interestsList = Array.isArray(lead.productInterest) ? lead.productInterest : [];
 
                 return (
                   <tr key={lead.leadId} className={`transition-colors ${rowBg}`}>
-                    <td className="py-2.5 pl-3.5 pr-1.5 font-mono text-slate-400 tabular-nums">
+                    <td className="py-3 pl-4 pr-2 font-mono text-slate-500 tabular-nums">
                       {idx + 1}
                     </td>
-                    <td className="py-2.5 px-2.5 whitespace-nowrap">
+                    <td className="py-3 px-3 whitespace-nowrap">
                       {isConfirmed ? (
-                        <span className="font-semibold text-emerald-300">
+                        <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
+                          <CheckCircle2 className="h-3 w-3" />
                           Confirmed {lead.whatsappSent ? '· WA' : ''}
                         </span>
                       ) : (
-                        <span className="font-semibold text-amber-300">
+                        <span className="inline-flex items-center gap-1 font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full">
                           Partial {isCurrentDraft ? '· Live' : '· Draft'}
                         </span>
                       )}
                     </td>
-                    <td className="py-2.5 px-2.5 font-medium text-white">
-                      {lead.name || <span className="text-slate-500 italic">Typing…</span>}
+                    <td className="py-3 px-3">
+                      <div className="font-bold text-slate-900">{lead.name || '—'}</div>
+                      <div className="text-slate-500 text-[11px] flex items-center gap-1 mt-0.5">
+                        <Briefcase className="h-3 w-3 text-slate-400 shrink-0" />
+                        <span>{lead.designation || 'No designation'}</span>
+                      </div>
                     </td>
-                    <td className="py-2.5 px-2.5 font-mono text-slate-200 tabular-nums whitespace-nowrap">
-                      {lead.phone || <span className="text-slate-500 italic">—</span>}
+                    <td className="py-3 px-3">
+                      <div className="font-mono text-slate-950 tabular-nums">{lead.phone || '—'}</div>
+                      <div className="text-slate-500 text-[11px] flex items-center gap-1 mt-0.5">
+                        <Mail className="h-3 w-3 text-slate-400 shrink-0" />
+                        <span>{lead.emailAddress || 'No email'}</span>
+                      </div>
                     </td>
-                    <td className="py-2.5 px-2.5 text-slate-200">
-                      {lead.companyName || <span className="text-slate-500 italic">—</span>}
+                    <td className="py-3 px-3">
+                      <div className="font-semibold text-slate-900">{lead.companyName || '—'}</div>
+                      <div className="text-slate-500 text-[11px] flex items-center gap-1 mt-0.5">
+                        <MapPin className="h-3 w-3 text-slate-400 shrink-0" />
+                        <span>{lead.city || 'No city'}</span>
+                      </div>
                     </td>
-                    <td className="py-2.5 px-2 text-right font-mono text-slate-200 tabular-nums">
+                    <td className="py-3 px-2 text-right font-mono font-semibold text-slate-900 tabular-nums">
                       {lead.outletsCount || '—'}
                     </td>
-                    <td className={`py-2.5 px-2.5 whitespace-nowrap ${productColor}`}>
-                      {lead.productInterest || 'Pending Choice'}
+                    <td className="py-3 px-3">
+                      {interestsList.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {interestsList.map((item) => (
+                            <span
+                              key={item}
+                              className="inline-block rounded-md bg-sky-50 border border-sky-200 text-sky-800 text-[11px] font-medium px-2 py-0.5"
+                            >
+                              {item}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 italic">None selected</span>
+                      )}
                     </td>
-                    <td className="py-2.5 pl-2 pr-3.5 text-slate-400 tabular-nums whitespace-nowrap">
+                    <td className="py-3 pl-2 pr-4 text-slate-500 tabular-nums whitespace-nowrap">
                       {formatReadableTimestamp(lead.updatedAt)}
                     </td>
                     {isAdminAuthenticated && (
-                      <td className="py-2.5 pl-1.5 pr-3.5 text-right">
+                      <td className="py-3 pl-2 pr-4 text-right">
                         <button
                           type="button"
                           onClick={() => setLeadToDelete(lead)}
                           aria-label={`Delete lead for ${lead.name || lead.leadId}`}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 transition-colors cursor-pointer"
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <Trash2 className="h-4 w-4" />
                         </button>
                       </td>
                     )}
@@ -430,21 +454,21 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
         </table>
       </div>
 
-      {/* Explicit Confirmation Dialog before Destructive Delete */}
+      {/* Confirmation Dialog before Destructive Delete */}
       {leadToDelete && (
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="delete-lead-dialog-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4"
         >
-          <div className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl space-y-4">
-            <h3 id="delete-lead-dialog-title" className="font-display text-lg font-bold text-white">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl space-y-4">
+            <h3 id="delete-lead-dialog-title" className="font-display text-lg font-bold text-slate-900">
               Delete Lead Record?
             </h3>
-            <p className="text-sm text-slate-300">
+            <p className="text-sm text-slate-600">
               Are you sure you want to permanently remove the lead for{' '}
-              <span className="font-semibold text-white">
+              <span className="font-semibold text-slate-900">
                 {leadToDelete.name || leadToDelete.phone || leadToDelete.leadId}
               </span>{' '}
               ({leadToDelete.companyName || 'Unlisted Company'})? This action cannot be undone.
@@ -453,7 +477,7 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
               <button
                 type="button"
                 onClick={() => setLeadToDelete(null)}
-                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-4 py-2.5 transition-colors cursor-pointer"
+                className="rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold px-4 py-2.5 transition-colors cursor-pointer shadow-sm"
               >
                 Cancel
               </button>
@@ -463,7 +487,7 @@ export const LiveGoogleSheetTable: React.FC<LiveGoogleSheetTableProps> = ({
                   onDeleteLead(leadToDelete);
                   setLeadToDelete(null);
                 }}
-                className="rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-4 py-2.5 transition-colors cursor-pointer"
+                className="rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-4 py-2.5 transition-colors cursor-pointer shadow-sm"
               >
                 Confirm Delete
               </button>
