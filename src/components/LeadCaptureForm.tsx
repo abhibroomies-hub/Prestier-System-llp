@@ -107,59 +107,18 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
         </div>
       </div>
 
-      {/* Confirmed Post-Submission Banner */}
       {syncState === 'confirmed' && submittedLeadId ? (
         <div
           role="status"
-          className="mt-6 rounded-xl border border-emerald-500/40 bg-emerald-950/40 p-5 space-y-4"
+          className="mt-6 rounded-xl border border-emerald-500/40 bg-emerald-950/40 p-6 text-center space-y-2"
         >
-          <div className="flex items-start gap-3">
-            <CheckCircle2 className="h-6 w-6 text-emerald-400 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <h3 className="font-display text-lg font-bold text-white">
-                Inquiry Confirmed &amp; Logged to Live Sheet
-              </h3>
-              <p className="text-sm text-slate-300">
-                Thank you, <span className="font-semibold text-white">{form.name}</span>. Your
-                requirement for{' '}
-                <span className="font-semibold text-emerald-300">{form.productInterest}</span> (
-                {form.outletsCount} outlets) is confirmed under ID{' '}
-                <span className="font-mono text-xs text-slate-300">{submittedLeadId}</span>.
-              </p>
-              {whatsappSentAuto ? (
-                <p className="text-xs text-emerald-300 font-medium pt-1">
-                  Automated 24x7 WhatsApp confirmation was dispatched directly to {form.phone}.
-                </p>
-              ) : (
-                <p className="text-xs text-slate-300 pt-1">
-                  You can also open your inquiry directly on WhatsApp below for immediate priority
-                  assistance.
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3 pt-1">
-            {whatsappDirectUrl && (
-              <a
-                href={whatsappDirectUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm px-4 py-2.5 transition-colors whitespace-nowrap shrink-0"
-              >
-                <MessageCircle className="h-4 w-4" />
-                Open Inquiry on WhatsApp
-              </a>
-            )}
-            <button
-              type="button"
-              onClick={onStartNewLead}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-800 text-slate-200 font-medium text-sm px-4 py-2.5 transition-colors whitespace-nowrap shrink-0"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Enter Another Inquiry
-            </button>
-          </div>
+          <CheckCircle2 className="h-8 w-8 text-emerald-400 mx-auto" />
+          <h3 className="font-display text-xl font-bold text-white">
+            Thanks, we will reach you soon
+          </h3>
+          <p className="text-xs text-slate-300">
+            Inquiry confirmed for <strong className="text-white">{form.name}</strong> ({form.companyName}).
+          </p>
         </div>
       ) : null}
 

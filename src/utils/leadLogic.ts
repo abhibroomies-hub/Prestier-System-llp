@@ -174,12 +174,12 @@ export function buildWhatsAppConfirmationMessage(
           'Hello {{name}},',
           '',
           'Thank you for connecting with *Prestier System LLP* — Precision Stainless Steel Manufacturing.',
-          'We have received your inquiry:',
+          'Thanks, we will reach you soon regarding your inquiry:',
           '• Company: {{companyName}}',
           '• Outlets: {{outletsCount}}',
           '• Product Interest: {{productInterest}}',
           '',
-          'Our engineering & sales specialist will reach out to you shortly.',
+          'Our engineering & sales specialist will connect with you shortly.',
         ].join('\n');
 
   return template

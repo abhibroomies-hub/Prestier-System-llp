@@ -23,6 +23,7 @@ import {
   markFirestoreLeadSynced,
   saveLeadToFirestore,
   signInWithGoogleSheets,
+  subscribeAdminFirestoreLeads,
 } from './services/firebase';
 import {
   createPrestierSpreadsheet,
@@ -74,7 +75,6 @@ export default function App() {
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const [isAdminConfigured, setIsAdminConfigured] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
-  const [showSuccessModal, setShowSuccessModal] = useState(false);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectedSheetRef = useRef<ConnectedSpreadsheet | null>(null);
@@ -123,10 +123,42 @@ export default function App() {
       }
     });
 
+    let unsubscribeFirestore: (() => void) | undefined;
+    try {
+      unsubscribeFirestore = subscribeAdminFirestoreLeads((firestoreLeads) => {
+        if (firestoreLeads && firestoreLeads.length > 0) {
+          setLeads((prev) => {
+            const map = new Map<string, LeadRecord>();
+            for (const l of prev) {
+              map.set(l.leadId, l);
+            }
+            for (const l of firestoreLeads) {
+              const existing = map.get(l.leadId);
+              if (!existing || new Date(l.updatedAt).getTime() >= new Date(existing.updatedAt).getTime()) {
+                map.set(l.leadId, l);
+              }
+            }
+            return Array.from(map.values()).sort(
+              (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+            );
+          });
+        }
+      }, () => {});
+    } catch {
+      // ignore
+    }
+
     return () => {
       es.close();
+      unsubscribeFirestore?.();
     };
   }, [fetchInitialLeads]);
+
+  useEffect(() => {
+    if (isAdminModalOpen) {
+      void fetchInitialLeads();
+    }
+  }, [isAdminModalOpen, fetchInitialLeads]);
 
   // 2. Check Admin Password Configuration Status
   const checkAdminStatus = useCallback(async (token?: string | null) => {
@@ -334,7 +366,6 @@ export default function App() {
       setWhatsappSentAuto(Boolean(result?.whatsappDispatchedNow));
       const waMsg = buildWhatsAppConfirmationMessage(sanitized);
       setWhatsappDirectUrl(buildWhatsAppDirectUrl(sanitized.phone, waMsg));
-      setShowSuccessModal(true);
     } finally {
       setIsSubmitting(false);
     }
@@ -518,71 +549,7 @@ export default function App() {
         />
       </main>
 
-      {/* Success Popup Modal after Submit */}
-      {showSuccessModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4"
-        >
-          <div className="w-full max-w-md rounded-2xl border border-emerald-500/40 bg-slate-900 p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center gap-3">
-              <div className="h-12 w-12 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
-                <CheckCircle2 className="h-6 w-6" />
-              </div>
-              <div>
-                <h3 className="font-display text-lg font-bold text-white">
-                  Inquiry Submitted Successfully!
-                </h3>
-                <p className="text-xs text-slate-300">
-                  Your details have been logged to the live system.
-                </p>
-              </div>
-            </div>
-            <div className="rounded-xl bg-slate-950 p-4 space-y-2 text-xs text-slate-300 border border-slate-800">
-              <p>
-                <span className="text-slate-400">Name:</span>{' '}
-                <strong className="text-white">{form.name}</strong>
-              </p>
-              <p>
-                <span className="text-slate-400">Company:</span>{' '}
-                <strong className="text-white">{form.companyName}</strong>
-              </p>
-              <p>
-                <span className="text-slate-400">Outlets:</span>{' '}
-                <strong className="text-white">{form.outletsCount}</strong>
-              </p>
-              <p>
-                <span className="text-slate-400">Requirement:</span>{' '}
-                <strong className="text-emerald-300">{form.productInterest}</strong>
-              </p>
-            </div>
-            <div className="flex flex-col sm:flex-row items-center gap-3 pt-2">
-              {whatsappDirectUrl && (
-                <a
-                  href={whatsappDirectUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm px-4 py-3 transition-colors"
-                >
-                  <MessageCircle className="h-4 w-4" />
-                  Open on WhatsApp
-                </a>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setShowSuccessModal(false);
-                  handleStartNewLead();
-                }}
-                className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-sm px-4 py-3 transition-colors cursor-pointer"
-              >
-                Enter New Inquiry
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+
 
       {/* Admin Dashboard Modal (Containing Real-Time Google Sheets Table & WhatsApp Panel) */}
       {isAdminModalOpen && (
