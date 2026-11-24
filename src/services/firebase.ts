@@ -47,17 +47,57 @@ const auth = getAuth(primaryApp);
 const firestore = getFirestore(primaryApp, appletConfig.firestoreDatabaseId);
 
 // Secondary 24x7 Firebase Realtime Database App (prestier-final)
+const DEFAULT_RTDB_ROOT_URL =
+  'https://prestier-final-default-rtdb.asia-southeast1.firebasedatabase.app';
+
+function normalizeRtdbRootUrl(rawUrl: string | undefined | null): string {
+  const cleaned = String(rawUrl || '')
+    .trim()
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim();
+  if (!cleaned) return '';
+  try {
+    const withProtocol = /^https?:\/\//i.test(cleaned)
+      ? cleaned
+      : `https://${cleaned}`;
+    const parsed = new URL(withProtocol);
+    if (parsed.hostname === 'console.firebase.google.com') {
+      return DEFAULT_RTDB_ROOT_URL;
+    }
+    if (
+      !parsed.hostname.endsWith('.firebasedatabase.app') &&
+      !parsed.hostname.endsWith('.firebaseio.com') &&
+      parsed.hostname !== 'localhost' &&
+      parsed.hostname !== '127.0.0.1'
+    ) {
+      return DEFAULT_RTDB_ROOT_URL;
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return DEFAULT_RTDB_ROOT_URL;
+  }
+}
+
 const rtdbAppName = 'prestier-rtdb-client';
 let rtdbClient: Database | null = null;
 
 function getRtdbClient(): Database | null {
   if (rtdbClient) return rtdbClient;
-  if (!rtdbConfig.databaseURL) return null;
+  const rootDatabaseUrl = normalizeRtdbRootUrl(
+    import.meta.env.VITE_FIREBASE_RTDB_DATABASE_URL || rtdbConfig.databaseURL
+  );
+  if (!rootDatabaseUrl) return null;
   try {
     const app =
       getApps().find((a) => a.name === rtdbAppName) ||
-      initializeApp(rtdbConfig, rtdbAppName);
-    rtdbClient = getDatabase(app, rtdbConfig.databaseURL);
+      initializeApp(
+        {
+          ...rtdbConfig,
+          databaseURL: rootDatabaseUrl,
+        },
+        rtdbAppName
+      );
+    rtdbClient = getDatabase(app, rootDatabaseUrl);
     return rtdbClient;
   } catch {
     return null;

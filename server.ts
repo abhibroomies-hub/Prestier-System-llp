@@ -731,11 +731,49 @@ const rtdbConfigDisk = readJsonFileSafe<RtdbConfigFile>(
   {}
 );
 
-const RTDB_DATABASE_URL = (
-  process.env.FIREBASE_RTDB_DATABASE_URL ||
-  rtdbConfigDisk.databaseURL ||
-  ''
-).trim();
+const DEFAULT_RTDB_ROOT_URL =
+  'https://prestier-final-default-rtdb.asia-southeast1.firebasedatabase.app';
+
+function normalizeRtdbRootUrl(
+  rawUrl: string | undefined | null,
+  fallbackUrl: string
+): string {
+  const cleaned = String(rawUrl || '')
+    .trim()
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim();
+  const safeFallback = fallbackUrl || DEFAULT_RTDB_ROOT_URL;
+  if (!cleaned) return safeFallback;
+  try {
+    const withProtocol = /^https?:\/\//i.test(cleaned)
+      ? cleaned
+      : `https://${cleaned}`;
+    const parsed = new URL(withProtocol);
+    if (parsed.hostname === 'console.firebase.google.com') {
+      return safeFallback;
+    }
+    if (
+      !parsed.hostname.endsWith('.firebasedatabase.app') &&
+      !parsed.hostname.endsWith('.firebaseio.com') &&
+      parsed.hostname !== 'localhost' &&
+      parsed.hostname !== '127.0.0.1'
+    ) {
+      return safeFallback;
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return safeFallback;
+  }
+}
+
+const diskRtdbRootUrl = normalizeRtdbRootUrl(
+  rtdbConfigDisk.databaseURL,
+  DEFAULT_RTDB_ROOT_URL
+);
+const RTDB_DATABASE_URL = normalizeRtdbRootUrl(
+  process.env.FIREBASE_RTDB_DATABASE_URL,
+  diskRtdbRootUrl
+);
 const RTDB_PROJECT_ID = (rtdbConfigDisk.projectId || 'prestier-final').trim();
 
 let rtdbInstance: Database | null = null;
@@ -1436,12 +1474,57 @@ function resolveSinglePrestairReplyImageBuffer(): Buffer | null {
   return null;
 }
 
-function hasSavedWhatsAppCreds(): boolean {
+let connectionReplacedAtMs = 0;
+
+function ensureValidWhatsAppCredsFile(): boolean {
+  const credsPath = path.join(WHATSAPP_AUTH_DIR, 'creds.json');
+  const backupPath = path.join(WHATSAPP_AUTH_DIR, 'creds.backup.json');
   try {
-    return fs.existsSync(path.join(WHATSAPP_AUTH_DIR, 'creds.json'));
+    if (fs.existsSync(credsPath)) {
+      const raw = fs.readFileSync(credsPath, 'utf8').trim();
+      if (raw.length > 20) {
+        JSON.parse(raw);
+        return true;
+      }
+    }
   } catch {
-    return false;
+    // Attempt recovery from backup if creds.json was truncated during container restart
   }
+
+  try {
+    if (fs.existsSync(backupPath)) {
+      const backupRaw = fs.readFileSync(backupPath, 'utf8').trim();
+      if (backupRaw.length > 20) {
+        JSON.parse(backupRaw);
+        fs.writeFileSync(credsPath, backupRaw, 'utf8');
+        return true;
+      }
+    }
+  } catch {
+    // ignore invalid backup
+  }
+  return false;
+}
+
+function backupWhatsAppCredsSafe(): void {
+  const credsPath = path.join(WHATSAPP_AUTH_DIR, 'creds.json');
+  const backupPath = path.join(WHATSAPP_AUTH_DIR, 'creds.backup.json');
+  try {
+    if (!fs.existsSync(credsPath)) return;
+    const raw = fs.readFileSync(credsPath, 'utf8').trim();
+    if (raw.length > 20) {
+      JSON.parse(raw);
+      const tmpPath = `${backupPath}.tmp`;
+      fs.writeFileSync(tmpPath, raw, 'utf8');
+      fs.renameSync(tmpPath, backupPath);
+    }
+  } catch {
+    // ignore transient read/parse race
+  }
+}
+
+function hasSavedWhatsAppCreds(): boolean {
+  return ensureValidWhatsAppCredsFile();
 }
 
 function cleanupActiveSocketOnly(): void {
@@ -1479,6 +1562,7 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
 
   try {
     fs.mkdirSync(WHATSAPP_AUTH_DIR, { recursive: true });
+    ensureValidWhatsAppCredsFile();
     const { state, saveCreds } = await useMultiFileAuthState(WHATSAPP_AUTH_DIR);
 
     let version: [number, number, number] | undefined;
@@ -1503,7 +1587,10 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
     });
 
     waSocket = sock;
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+      backupWhatsAppCredsSafe();
+    });
 
     if (cleanPairingDigits && !state.creds.registered) {
       setTimeout(async () => {
@@ -1534,11 +1621,13 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
       if (connection === 'open') {
         const rawUserId = sock.user?.id || '';
         const connectedPhone = rawUserId.split(':')[0].split('@')[0] || 'Linked';
+        connectionReplacedAtMs = 0;
         waState.status = 'connected';
         waState.qrDataUrl = null;
         waState.pairingCode = null;
         waState.connectedNumber = `+${connectedPhone}`;
         waState.lastError = null;
+        backupWhatsAppCredsSafe();
         void publishLocalWaRuntimeStatusToRtdb();
       }
 
@@ -1567,6 +1656,7 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
         if (statusCode === DisconnectReason.connectionReplaced) {
           // Another active deployment (e.g. 24x7 Railway server) took over the WhatsApp socket.
           // NEVER delete local creds.json, and do NOT fight it in a reconnect loop!
+          connectionReplacedAtMs = Date.now();
           waState.status = 'disconnected';
           waState.lastError = null;
           return;
@@ -1608,10 +1698,26 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
   }
 }
 
-// Publish WhatsApp 24x7 heartbeat every 20s when locally connected
+// Publish WhatsApp 24x7 heartbeat every 20s when locally connected,
+// and auto-resume saved WhatsApp credentials after rolling updates if no remote worker is active.
 setInterval(() => {
   if (waState.status === 'connected' && waSocket) {
     void publishLocalWaRuntimeStatusToRtdb();
+    return;
+  }
+  const recentlyReplaced =
+    connectionReplacedAtMs > 0 && Date.now() - connectionReplacedAtMs < 90_000;
+  if (
+    waState.status === 'disconnected' &&
+    !waSocket &&
+    !waConnectLock &&
+    hasSavedWhatsAppCreds() &&
+    !isShuttingDown &&
+    !explicitUnlinkRequested &&
+    !recentlyReplaced &&
+    !isRemoteCloudWorkerActive()
+  ) {
+    void startWhatsAppConnection();
   }
 }, 20_000).unref();
 
@@ -2631,7 +2737,12 @@ async function startServer(): Promise<void> {
   const handleGracefulShutdown = () => {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    const wasConnectedHere = waState.status === 'connected';
+    backupWhatsAppCredsSafe();
     cleanupActiveSocketOnly();
+    if (rtdbInstance && wasConnectedHere) {
+      void remove(ref(rtdbInstance, 'meta/waRuntimeStatus')).catch(() => {});
+    }
     httpServer.close(() => {
       process.exit(0);
     });
