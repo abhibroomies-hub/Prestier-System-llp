@@ -736,7 +736,7 @@ export default function App() {
         );
       } else {
         setSheetSuccessMsg(
-          `Queued Prestair WhatsApp reply + showcase image in background for ${lead.name || lead.phone}.`
+          `Queued both 2 Prestair WhatsApp messages (Image + Text) in background for ${lead.name || lead.phone}.`
         );
       }
     } catch {

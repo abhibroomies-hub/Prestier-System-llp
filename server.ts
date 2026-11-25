@@ -6,6 +6,7 @@ import { getApps, initializeApp } from 'firebase/app';
 import {
   get,
   getDatabase,
+  onDisconnect,
   onValue,
   ref,
   remove,
@@ -818,7 +819,7 @@ function isRemoteCloudWorkerActive(): boolean {
   if (!remoteWaRuntime) return false;
   if (remoteWaRuntime.instanceId === SERVER_INSTANCE_ID) return false;
   if (remoteWaRuntime.status !== 'connected') return false;
-  return Date.now() - remoteWaRuntime.updatedAt < 65_000;
+  return Date.now() - remoteWaRuntime.updatedAt < 45_000;
 }
 
 function getRtdbStatusPayload() {
@@ -941,7 +942,9 @@ async function pushSheetSyncMetaToRtdb(): Promise<void> {
 async function publishLocalWaRuntimeStatusToRtdb(): Promise<void> {
   if (!rtdbInstance || waState.status !== 'connected') return;
   try {
-    await set(ref(rtdbInstance, 'meta/waRuntimeStatus'), {
+    const statusRef = ref(rtdbInstance, 'meta/waRuntimeStatus');
+    void onDisconnect(statusRef).remove().catch(() => {});
+    await set(statusRef, {
       instanceId: SERVER_INSTANCE_ID,
       status: 'connected',
       connectedNumber: waState.connectedNumber,
@@ -1400,74 +1403,95 @@ function initServerRealtimeDbSync(): void {
 
     // 8. Process relayed WhatsApp send jobs if THIS server holds the active WhatsApp connection
     onValue(ref(rtdbInstance, 'meta/waDispatchQueue'), (snap) => {
-      if (waState.status !== 'connected' || !waSocket) return;
-      const val = snap.val() as Record<string, Partial<WaDispatchJob>> | null;
-      if (!val || typeof val !== 'object') return;
-      const now = Date.now();
-
-      for (const [key, rawJob] of Object.entries(val)) {
-        if (!rawJob || typeof rawJob !== 'object') continue;
-        const requestedAt = typeof rawJob.requestedAt === 'number' ? rawJob.requestedAt : 0;
-        // Clean up stale jobs older than 5 minutes
-        if (now - requestedAt > 5 * 60 * 1000) {
-          if (rtdbInstance) {
-            void remove(ref(rtdbInstance, `meta/waDispatchQueue/${key}`)).catch(() => {});
-          }
-          continue;
-        }
-        if (rawJob.status !== 'pending') continue;
-        if (processedRelayJobs.has(key)) continue;
-        processedRelayJobs.add(key);
-
-        const phone = typeof rawJob.phone === 'string' ? rawJob.phone : '';
-        const text = typeof rawJob.text === 'string' ? rawJob.text : '';
-        const sendSecond =
-          typeof rawJob.sendSecond === 'boolean'
-            ? rawJob.sendSecond
-            : waSettings.secondMessageEnabled;
-        const secondText =
-          typeof rawJob.secondText === 'string' && rawJob.secondText.trim()
-            ? rawJob.secondText
-            : waSettings.secondMessageTemplate;
-        const leadId = typeof rawJob.leadId === 'string' ? rawJob.leadId : '';
-
-        void (async () => {
-          try {
-            if (rtdbInstance) {
-              await set(ref(rtdbInstance, `meta/waDispatchQueue/${key}/status`), 'processing');
-            }
-            await sendPrestairWhatsAppReplyWithSingleImage(phone, text, {
-              sendSecond,
-              secondCaptionText: secondText,
-            });
-            if (leadId && !deletedLeadIds.has(leadId)) {
-              const existingLead = leadsStore.get(leadId);
-              if (existingLead) {
-                const marked: LeadRecord = {
-                  ...existingLead,
-                  whatsappSent: true,
-                  updatedAt: new Date().toISOString(),
-                };
-                leadsStore.set(leadId, marked);
-                persistLeadsLocal();
-                await pushLeadToRtdb(marked);
-                queueLeadForAppsScriptSync(marked, true);
-                broadcastSseSnapshot();
-              }
-            }
-            if (rtdbInstance) {
-              await remove(ref(rtdbInstance, `meta/waDispatchQueue/${key}`));
-            }
-          } catch {
-            if (rtdbInstance) {
-              await remove(ref(rtdbInstance, `meta/waDispatchQueue/${key}`)).catch(() => {});
-            }
-          }
-        })();
-      }
+      processWaDispatchQueueSnapshot(
+        snap.val() as Record<string, Partial<WaDispatchJob>> | null
+      );
     });
   } catch (err) {
     rtdbState.lastError = (err as Error)?.message || 'Failed initializing Firebase RTDB.';
+  }
+}
+
+function processWaDispatchQueueSnapshot(
+  val: Record<string, Partial<WaDispatchJob>> | null
+): void {
+  if (!val || typeof val !== 'object') return;
+  const now = Date.now();
+
+  for (const [key, rawJob] of Object.entries(val)) {
+    if (!rawJob || typeof rawJob !== 'object') continue;
+    const requestedAt = typeof rawJob.requestedAt === 'number' ? rawJob.requestedAt : 0;
+    // Clean up stale jobs older than 5 minutes (even if WhatsApp is not connected here)
+    if (now - requestedAt > 5 * 60 * 1000) {
+      if (rtdbInstance) {
+        void remove(ref(rtdbInstance, `meta/waDispatchQueue/${key}`)).catch(() => {});
+      }
+      continue;
+    }
+
+    if (waState.status !== 'connected' || !waSocket) continue;
+    if (rawJob.status !== 'pending') continue;
+    if (processedRelayJobs.has(key)) continue;
+    processedRelayJobs.add(key);
+
+    const phone = typeof rawJob.phone === 'string' ? rawJob.phone : '';
+    const text = typeof rawJob.text === 'string' ? rawJob.text : '';
+    const sendSecond =
+      typeof rawJob.sendSecond === 'boolean'
+        ? rawJob.sendSecond
+        : waSettings.secondMessageEnabled;
+    const secondText =
+      typeof rawJob.secondText === 'string' && rawJob.secondText.trim()
+        ? rawJob.secondText
+        : waSettings.secondMessageTemplate;
+    const leadId = typeof rawJob.leadId === 'string' ? rawJob.leadId : '';
+
+    void (async () => {
+      try {
+        if (rtdbInstance) {
+          await set(ref(rtdbInstance, `meta/waDispatchQueue/${key}/status`), 'processing');
+        }
+        await sendPrestairWhatsAppReplyWithSingleImage(phone, text, {
+          sendSecond,
+          secondCaptionText: secondText,
+        });
+        if (leadId && !deletedLeadIds.has(leadId)) {
+          const existingLead = leadsStore.get(leadId);
+          if (existingLead) {
+            const marked: LeadRecord = {
+              ...existingLead,
+              whatsappSent: true,
+              updatedAt: new Date().toISOString(),
+            };
+            leadsStore.set(leadId, marked);
+            persistLeadsLocal();
+            await pushLeadToRtdb(marked);
+            queueLeadForAppsScriptSync(marked, true);
+            broadcastSseSnapshot();
+          }
+        }
+        if (rtdbInstance) {
+          await remove(ref(rtdbInstance, `meta/waDispatchQueue/${key}`));
+        }
+      } catch {
+        processedRelayJobs.delete(key);
+        if (rtdbInstance) {
+          await remove(ref(rtdbInstance, `meta/waDispatchQueue/${key}`)).catch(() => {});
+        }
+      }
+    })();
+  }
+}
+
+async function drainPendingWaDispatchQueueFromRtdb(): Promise<void> {
+  if (!rtdbInstance || waState.status !== 'connected' || !waSocket) return;
+  try {
+    const snap = await get(ref(rtdbInstance, 'meta/waDispatchQueue'));
+    processWaDispatchQueueSnapshot(
+      snap.val() as Record<string, Partial<WaDispatchJob>> | null
+    );
+  } catch {
+    // ignore transient read error
   }
 }
 
@@ -1541,7 +1565,19 @@ let explicitUnlinkRequested = false;
 let isShuttingDown = false;
 const inFlightLeadWaDispatches = new Set<string>();
 
-function resolveStaticAssetBuffer(assetWebPath: string): Buffer | null {
+interface ResolvedReplyImage {
+  buffer: Buffer;
+  mimeType: string;
+}
+
+function detectImageMimeFromBuffer(buf: Buffer): string | null {
+  if (validateImageBinaryMagic('image/jpeg', buf)) return 'image/jpeg';
+  if (validateImageBinaryMagic('image/png', buf)) return 'image/png';
+  if (validateImageBinaryMagic('image/webp', buf)) return 'image/webp';
+  return null;
+}
+
+function resolveStaticAssetImage(assetWebPath: string): ResolvedReplyImage | null {
   const relPath = assetWebPath.replace(/^\/+/, '');
   const candidates = [
     path.resolve(process.cwd(), 'public', relPath),
@@ -1551,8 +1587,9 @@ function resolveStaticAssetBuffer(assetWebPath: string): Buffer | null {
     try {
       if (fs.existsSync(candidate)) {
         const buf = fs.readFileSync(candidate);
-        if (buf.length > 32) {
-          return buf;
+        const detectedMime = detectImageMimeFromBuffer(buf);
+        if (detectedMime) {
+          return { buffer: buf, mimeType: detectedMime };
         }
       }
     } catch {
@@ -1562,7 +1599,7 @@ function resolveStaticAssetBuffer(assetWebPath: string): Buffer | null {
   return null;
 }
 
-function resolveSinglePrestairReplyImageBuffer(): Buffer | null {
+function resolveFirstPrestairReplyImage(): ResolvedReplyImage | null {
   if (waReplyImage.mode === 'none') {
     return null;
   }
@@ -1570,16 +1607,16 @@ function resolveSinglePrestairReplyImageBuffer(): Buffer | null {
     try {
       const customBuf = Buffer.from(waReplyImage.base64Data, 'base64');
       if (validateImageBinaryMagic(waReplyImage.mimeType, customBuf)) {
-        return customBuf;
+        return { buffer: customBuf, mimeType: waReplyImage.mimeType };
       }
     } catch {
       // fallback to default image if decoding fails
     }
   }
-  return resolveStaticAssetBuffer(PRESTAIR_REPLY_IMAGES[0]);
+  return resolveStaticAssetImage(PRESTAIR_REPLY_IMAGES[0]);
 }
 
-function resolveSecondPrestairReplyImageBuffer(): Buffer | null {
+function resolveSecondPrestairReplyImage(): ResolvedReplyImage | null {
   if (waReplyImage2.mode === 'none') {
     return null;
   }
@@ -1587,18 +1624,100 @@ function resolveSecondPrestairReplyImageBuffer(): Buffer | null {
     try {
       const customBuf = Buffer.from(waReplyImage2.base64Data, 'base64');
       if (validateImageBinaryMagic(waReplyImage2.mimeType, customBuf)) {
-        return customBuf;
+        return { buffer: customBuf, mimeType: waReplyImage2.mimeType };
       }
     } catch {
       // fallback below
     }
   }
-  const secondDefaultBuf = resolveStaticAssetBuffer(PRESTAIR_SECOND_REPLY_IMAGES[0]);
-  if (secondDefaultBuf) {
-    return secondDefaultBuf;
+  const secondDefaultImg = resolveStaticAssetImage(PRESTAIR_SECOND_REPLY_IMAGES[0]);
+  if (secondDefaultImg) {
+    return secondDefaultImg;
   }
-  // If no custom 2nd image uploaded yet and default 2nd file is absent, reuse active Message #1 showcase image
-  return resolveSinglePrestairReplyImageBuffer();
+  // Reuse active Message #1 showcase image if custom Image #2 hasn't been uploaded yet
+  return resolveFirstPrestairReplyImage();
+}
+
+async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
+  if (!rtdbInstance) return;
+  try {
+    if (waSettings.updatedAt === 0) {
+      const snap = await get(ref(rtdbInstance, 'meta/waSettings'));
+      const val = snap.val() as Partial<WhatsAppSettings> | null;
+      if (val && typeof val === 'object') {
+        waSettings = {
+          autoReplyEnabled:
+            typeof val.autoReplyEnabled === 'boolean'
+              ? val.autoReplyEnabled
+              : waSettings.autoReplyEnabled,
+          messageTemplate:
+            typeof val.messageTemplate === 'string' && val.messageTemplate.trim()
+              ? val.messageTemplate.slice(0, 4000)
+              : DEFAULT_PRESTAIR_WHATSAPP_REPLY,
+          secondMessageEnabled:
+            typeof val.secondMessageEnabled === 'boolean'
+              ? val.secondMessageEnabled
+              : true,
+          secondMessageTemplate:
+            typeof val.secondMessageTemplate === 'string' && val.secondMessageTemplate.trim()
+              ? val.secondMessageTemplate.slice(0, 4000)
+              : DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+          adminNotifyPhone:
+            typeof val.adminNotifyPhone === 'string'
+              ? sanitizeField(val.adminNotifyPhone, 32)
+              : '',
+          updatedAt: typeof val.updatedAt === 'number' ? val.updatedAt : 1,
+        };
+        persistWaSettingsLocal();
+      }
+    }
+
+    if (waReplyImage.updatedAt === 0) {
+      const snap1 = await get(ref(rtdbInstance, 'meta/waReplyImage'));
+      const val1 = snap1.val() as Partial<WhatsAppReplyImageState> | null;
+      if (
+        val1 &&
+        val1.mode === 'custom' &&
+        typeof val1.mimeType === 'string' &&
+        typeof val1.base64Data === 'string'
+      ) {
+        const buf1 = Buffer.from(val1.base64Data, 'base64');
+        if (validateImageBinaryMagic(val1.mimeType, buf1)) {
+          waReplyImage = {
+            mode: 'custom',
+            mimeType: val1.mimeType,
+            base64Data: val1.base64Data,
+            updatedAt: typeof val1.updatedAt === 'number' ? val1.updatedAt : 1,
+          };
+          persistWaReplyImageLocal();
+        }
+      }
+    }
+
+    if (waReplyImage2.updatedAt === 0) {
+      const snap2 = await get(ref(rtdbInstance, 'meta/waReplyImage2'));
+      const val2 = snap2.val() as Partial<WhatsAppReplyImageState> | null;
+      if (
+        val2 &&
+        val2.mode === 'custom' &&
+        typeof val2.mimeType === 'string' &&
+        typeof val2.base64Data === 'string'
+      ) {
+        const buf2 = Buffer.from(val2.base64Data, 'base64');
+        if (validateImageBinaryMagic(val2.mimeType, buf2)) {
+          waReplyImage2 = {
+            mode: 'custom',
+            mimeType: val2.mimeType,
+            base64Data: val2.base64Data,
+            updatedAt: typeof val2.updatedAt === 'number' ? val2.updatedAt : 1,
+          };
+          persistWaReplyImage2Local();
+        }
+      }
+    }
+  } catch {
+    // ignore transient RTDB read failure
+  }
 }
 
 let connectionReplacedAtMs = 0;
@@ -1756,6 +1875,7 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
         waState.lastError = null;
         backupWhatsAppCredsSafe();
         void publishLocalWaRuntimeStatusToRtdb();
+        void drainPendingWaDispatchQueueFromRtdb();
       }
 
       if (connection === 'close') {
@@ -1825,11 +1945,12 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
   }
 }
 
-// Publish WhatsApp 24x7 heartbeat every 20s when locally connected,
-// and auto-resume saved WhatsApp credentials after rolling updates if no remote worker is active.
+// Publish WhatsApp 24x7 heartbeat every 15s when locally connected,
+// drain any pending relay jobs, and auto-resume saved credentials if no remote worker is active.
 setInterval(() => {
   if (waState.status === 'connected' && waSocket) {
     void publishLocalWaRuntimeStatusToRtdb();
+    void drainPendingWaDispatchQueueFromRtdb();
     return;
   }
   const recentlyReplaced =
@@ -1846,18 +1967,30 @@ setInterval(() => {
   ) {
     void startWhatsAppConnection();
   }
-}, 20_000).unref();
+}, 15_000).unref();
+
+async function waitForActiveWaSocket(maxWaitMs = 8000): Promise<WASocket> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (waSocket && waState.status === 'connected') {
+      return waSocket;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  if (waSocket && waState.status === 'connected') {
+    return waSocket;
+  }
+  throw new Error('WhatsApp device is not linked yet.');
+}
 
 async function resolveWhatsAppJid(rawPhone: string): Promise<string> {
-  if (!waSocket || waState.status !== 'connected') {
-    throw new Error('WhatsApp is not connected.');
-  }
+  const sock = await waitForActiveWaSocket(5000);
   const digits = normalizePhoneForWhatsApp(rawPhone);
   if (!digits || digits.length < 8) {
     throw new Error('Invalid recipient WhatsApp number.');
   }
   try {
-    const results = await waSocket.onWhatsApp(digits);
+    const results = await sock.onWhatsApp(digits);
     if (Array.isArray(results) && results[0]?.exists && results[0]?.jid) {
       return results[0].jid;
     }
@@ -1865,6 +1998,39 @@ async function resolveWhatsAppJid(rawPhone: string): Promise<string> {
     // fallback to standard s.whatsapp.net JID
   }
   return `${digits}@s.whatsapp.net`;
+}
+
+async function sendSingleWhatsAppMediaOrText(
+  jid: string,
+  caption: string,
+  imagePayload: ResolvedReplyImage | null
+): Promise<void> {
+  const sock = await waitForActiveWaSocket(8000);
+  if (!imagePayload) {
+    await sock.sendMessage(jid, { text: caption });
+    return;
+  }
+
+  try {
+    await sock.sendMessage(jid, {
+      image: imagePayload.buffer,
+      mimetype: imagePayload.mimeType,
+      caption,
+    });
+  } catch {
+    // Retry media upload once after brief pause, then fallback to text so delivery never drops
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const retrySock = await waitForActiveWaSocket(8000);
+    try {
+      await retrySock.sendMessage(jid, {
+        image: imagePayload.buffer,
+        mimetype: imagePayload.mimeType,
+        caption,
+      });
+    } catch {
+      await retrySock.sendMessage(jid, { text: caption });
+    }
+  }
 }
 
 async function sendPrestairWhatsAppReplyWithSingleImage(
@@ -1875,51 +2041,28 @@ async function sendPrestairWhatsAppReplyWithSingleImage(
     secondCaptionText?: string;
   }
 ): Promise<void> {
-  if (!waSocket || waState.status !== 'connected') {
-    throw new Error('WhatsApp device is not linked yet.');
-  }
+  await ensureWaMetaHydratedFromRtdb();
   const jid = await resolveWhatsAppJid(rawPhone);
 
-  // Message 1: First Image + Text
-  const firstImageBuffer = resolveSinglePrestairReplyImageBuffer();
+  // Message 1: First Separate Image + Text Confirmation
+  const firstImage = resolveFirstPrestairReplyImage();
   const cleanFirstCaption = captionText.trim() || DEFAULT_PRESTAIR_WHATSAPP_REPLY;
-
-  if (firstImageBuffer) {
-    await waSocket.sendMessage(jid, {
-      image: firstImageBuffer,
-      caption: cleanFirstCaption,
-    });
-  } else {
-    await waSocket.sendMessage(jid, {
-      text: cleanFirstCaption,
-    });
-  }
+  await sendSingleWhatsAppMediaOrText(jid, cleanFirstCaption, firstImage);
 
   // Message 2: Second Separate Image + Text Confirmation
   const shouldSendSecond =
     typeof options?.sendSecond === 'boolean'
       ? options.sendSecond
-      : waSettings.secondMessageEnabled;
+      : waSettings.secondMessageEnabled !== false;
 
   if (shouldSendSecond) {
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    if (!waSocket || waState.status !== 'connected') return;
-
-    const secondImageBuffer = resolveSecondPrestairReplyImageBuffer();
+    // Wait 1.4s so Message 2 always gets a distinct >1s Unix timestamp in Baileys and arrives as a clean 2nd bubble
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+    const secondImage = resolveSecondPrestairReplyImage();
     const cleanSecondCaption =
       (options?.secondCaptionText ?? waSettings.secondMessageTemplate).trim() ||
       DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY;
-
-    if (secondImageBuffer) {
-      await waSocket.sendMessage(jid, {
-        image: secondImageBuffer,
-        caption: cleanSecondCaption,
-      });
-    } else {
-      await waSocket.sendMessage(jid, {
-        text: cleanSecondCaption,
-      });
-    }
+    await sendSingleWhatsAppMediaOrText(jid, cleanSecondCaption, secondImage);
   }
 }
 
@@ -2971,12 +3114,14 @@ async function startServer(): Promise<void> {
     const wasConnectedHere = waState.status === 'connected';
     backupWhatsAppCredsSafe();
     cleanupActiveSocketOnly();
-    if (rtdbInstance && wasConnectedHere) {
-      void remove(ref(rtdbInstance, 'meta/waRuntimeStatus')).catch(() => {});
-    }
-    httpServer.close(() => {
-      process.exit(0);
-    });
+    void (async () => {
+      if (rtdbInstance && wasConnectedHere) {
+        await remove(ref(rtdbInstance, 'meta/waRuntimeStatus')).catch(() => {});
+      }
+      httpServer.close(() => {
+        process.exit(0);
+      });
+    })();
     setTimeout(() => process.exit(0), 3000).unref();
   };
 
