@@ -50,6 +50,16 @@ export const DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY = [
   'Team Prestair',
 ].join('\n');
 
+export const DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY = [
+  '📄 *Prestair System LLP — Product Catalogue & Showcase*',
+  '',
+  'Please find our product details & equipment showcase attached for your reference.',
+  '',
+  'Reply here on WhatsApp with your required size, temperature range, or store city for a customized quotation.',
+  '',
+  'Team Prestair',
+].join('\n');
+
 export const PRESTAIR_REPLY_IMAGES = [
   '/assets/aistudio/image_667a0296.png',
 ] as const;

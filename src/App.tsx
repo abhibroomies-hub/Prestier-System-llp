@@ -757,8 +757,12 @@ export default function App() {
             'Could not send WhatsApp message. Check WhatsApp tab to ensure QR is linked.'
         );
       } else {
+        const count =
+          typeof data.activeCount === 'number' && data.activeCount > 0 ? data.activeCount : 2;
         setSheetSuccessMsg(
-          `Queued both 2 Prestair WhatsApp messages (Image + Text) in background for ${lead.name || lead.phone}.`
+          `Queued ${count} configured Prestair WhatsApp message${
+            count === 1 ? '' : 's'
+          } in background for ${lead.name || lead.phone}.`
         );
       }
     } catch {

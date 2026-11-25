@@ -1,9 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
+  Download,
+  FileSpreadsheet,
+  FileText,
+  Film,
   ImagePlus,
   Loader2,
   MessageCircle,
+  Paperclip,
   Pencil,
   RefreshCw,
   RotateCcw,
@@ -11,21 +16,46 @@ import {
   Send,
   Trash2,
   Unlink,
+  Upload,
   X,
 } from 'lucide-react';
 import {
   DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+  DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY,
   DEFAULT_PRESTAIR_WHATSAPP_REPLY,
   PRESTAIR_REPLY_IMAGES,
   PRESTAIR_SECOND_REPLY_IMAGES,
 } from '../utils/leadLogic';
 
-type ReplyImageMode = 'default' | 'custom' | 'none';
+type SlotNumber = 1 | 2 | 3;
+type SlotMode = 'default' | 'custom' | 'none';
+type SlotCategory = 'image' | 'video' | 'pdf' | 'document';
 type AspectPreset = 'original' | '16:10' | '4:3' | '1:1';
 
+interface SlotMediaStatusPayload {
+  slot: SlotNumber;
+  mode: SlotMode;
+  hasDefault: boolean;
+  hasCustomFile: boolean;
+  mimeType: string | null;
+  fileName: string | null;
+  byteLength: number;
+  category: SlotCategory;
+  updatedAt: number;
+}
+
 interface ReplyImageSlotPayload {
-  mode: ReplyImageMode;
+  mode: SlotMode;
   customDataUrl: string | null;
+  updatedAt: number;
+}
+
+interface ReplyVideoSlotPayload {
+  mode: 'custom' | 'none';
+  hasVideo: boolean;
+  mimeType: string | null;
+  fileName: string | null;
+  byteLength: number;
   updatedAt: number;
 }
 
@@ -39,13 +69,136 @@ interface WhatsAppStatusPayload {
   lastError: string | null;
   settings: {
     autoReplyEnabled: boolean;
+    firstMessageEnabled?: boolean;
     messageTemplate: string;
     secondMessageEnabled?: boolean;
     secondMessageTemplate?: string;
+    thirdMessageEnabled?: boolean;
+    thirdMessageTemplate?: string;
     adminNotifyPhone: string;
   };
   replyImage?: ReplyImageSlotPayload;
   replyImage2?: ReplyImageSlotPayload;
+  replyVideo3?: ReplyVideoSlotPayload;
+  slotMedia?: Record<'1' | '2' | '3', SlotMediaStatusPayload>;
+}
+
+const MAX_CLIENT_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB universal file limit
+
+const BLOCKED_CLIENT_EXTENSIONS = new Set([
+  '.exe',
+  '.dll',
+  '.bat',
+  '.cmd',
+  '.com',
+  '.scr',
+  '.msi',
+  '.pif',
+  '.sh',
+  '.bash',
+  '.ps1',
+  '.vbs',
+  '.vbe',
+  '.wsf',
+  '.hta',
+  '.jar',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.html',
+  '.htm',
+  '.xhtml',
+  '.svg',
+  '.svgz',
+]);
+
+function formatBytesHuman(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileExtensionUpper(fileName: string | null): string {
+  if (!fileName) return 'FILE';
+  const dotIdx = fileName.lastIndexOf('.');
+  if (dotIdx === -1 || dotIdx === fileName.length - 1) return 'FILE';
+  return fileName.slice(dotIdx + 1).toUpperCase().slice(0, 8);
+}
+
+function describeSlotShortLabel(slotMeta: SlotMediaStatusPayload): string {
+  if (slotMeta.mode === 'none') return 'Text Only';
+  if (slotMeta.mode === 'default') return 'Image + Text';
+  if (!slotMeta.hasCustomFile) return slotMeta.hasDefault ? 'Image + Text' : 'Text Only';
+  if (slotMeta.category === 'pdf') return 'PDF + Text';
+  if (slotMeta.category === 'video') return 'Video + Text';
+  if (slotMeta.category === 'image') return 'Image + Text';
+  const ext = getFileExtensionUpper(slotMeta.fileName);
+  return `${ext} + Text`;
+}
+
+function buildFallbackSlotMeta(
+  slot: SlotNumber,
+  data?: WhatsAppStatusPayload | null
+): SlotMediaStatusPayload {
+  const fromSlotMap = data?.slotMedia?.[String(slot) as '1' | '2' | '3'];
+  if (fromSlotMap) {
+    return fromSlotMap;
+  }
+  if (slot === 1 && data?.replyImage) {
+    const isCustom = data.replyImage.mode === 'custom' && Boolean(data.replyImage.customDataUrl);
+    return {
+      slot: 1,
+      mode: data.replyImage.mode,
+      hasDefault: true,
+      hasCustomFile: isCustom,
+      mimeType: isCustom ? 'image/jpeg' : null,
+      fileName: isCustom ? 'prestair-message-1.jpg' : null,
+      byteLength: 0,
+      category: 'image',
+      updatedAt: data.replyImage.updatedAt || 0,
+    };
+  }
+  if (slot === 2 && data?.replyImage2) {
+    const isCustom = data.replyImage2.mode === 'custom' && Boolean(data.replyImage2.customDataUrl);
+    return {
+      slot: 2,
+      mode: data.replyImage2.mode,
+      hasDefault: true,
+      hasCustomFile: isCustom,
+      mimeType: isCustom ? 'image/jpeg' : null,
+      fileName: isCustom ? 'prestair-message-2.jpg' : null,
+      byteLength: 0,
+      category: 'image',
+      updatedAt: data.replyImage2.updatedAt || 0,
+    };
+  }
+  if (slot === 3 && data?.replyVideo3) {
+    const hasVid = data.replyVideo3.mode === 'custom' && data.replyVideo3.hasVideo;
+    return {
+      slot: 3,
+      mode: hasVid ? 'custom' : 'none',
+      hasDefault: false,
+      hasCustomFile: hasVid,
+      mimeType: data.replyVideo3.mimeType,
+      fileName: data.replyVideo3.fileName,
+      byteLength: data.replyVideo3.byteLength,
+      category: 'video',
+      updatedAt: data.replyVideo3.updatedAt || 0,
+    };
+  }
+  return {
+    slot,
+    mode: slot === 3 ? 'none' : 'default',
+    hasDefault: slot !== 3,
+    hasCustomFile: false,
+    mimeType: null,
+    fileName: null,
+    byteLength: 0,
+    category: slot === 3 ? 'document' : 'image',
+    updatedAt: 0,
+  };
 }
 
 function drawEditedImageToCanvas(
@@ -109,38 +262,43 @@ function drawEditedImageToCanvas(
   ctx.restore();
 }
 
-interface ReplyImageEditorSectionProps {
-  slot: 1 | 2;
+interface ReplyAttachmentEditorSectionProps {
+  slot: SlotNumber;
   label: string;
-  mode: ReplyImageMode;
-  displaySrc: string;
-  fallbackDisplaySrc?: string | null;
+  slotMeta: SlotMediaStatusPayload;
+  defaultImageSrc?: string | null;
+  fallbackDefaultImageSrc?: string | null;
   adminToken: string | null;
-  onEditingChange: (editing: boolean) => void;
+  onEditingChange?: (editing: boolean) => void;
   onUpdated: (payload: {
-    replyImage?: ReplyImageSlotPayload;
-    replyImage2?: ReplyImageSlotPayload;
+    slotMedia?: Record<'1' | '2' | '3', SlotMediaStatusPayload>;
+    settings?: WhatsAppStatusPayload['settings'];
+    justUploadedCustomFile?: boolean;
   }) => void;
 }
 
-const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
+const ReplyAttachmentEditorSection: React.FC<ReplyAttachmentEditorSectionProps> = ({
   slot,
   label,
-  mode,
-  displaySrc,
-  fallbackDisplaySrc,
+  slotMeta,
+  defaultImageSrc,
+  fallbackDefaultImageSrc,
   adminToken,
   onEditingChange,
   onUpdated,
 }) => {
-  const [isSavingImage, setIsSavingImage] = useState(false);
-  const [imgLoadFailed, setImgLoadFailed] = useState(false);
-  const [usedFallback, setUsedFallback] = useState(false);
-  const [imageFeedback, setImageFeedback] = useState<{
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [loadedStamp, setLoadedStamp] = useState<number>(0);
+  const [defaultImgFailed, setDefaultImgFailed] = useState(false);
+  const [usedFallbackDefault, setUsedFallbackDefault] = useState(false);
+  const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
 
+  // Built-in Canvas Image Editor state (available whenever an image is active)
   const [isEditingImage, setIsEditingImage] = useState(false);
   const [rotationDeg, setRotationDeg] = useState(0);
   const [aspectPreset, setAspectPreset] = useState<AspectPreset>('16:10');
@@ -148,16 +306,34 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
   const [brightnessPct, setBrightnessPct] = useState(100);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const currentObjectUrlRef = useRef<string | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const loadedEditorImgRef = useRef<HTMLImageElement | null>(null);
 
-  useEffect(() => {
-    setImgLoadFailed(false);
-    setUsedFallback(false);
-  }, [displaySrc, mode]);
+  const replaceObjectUrl = (nextUrl: string | null) => {
+    if (currentObjectUrlRef.current && currentObjectUrlRef.current !== nextUrl) {
+      URL.revokeObjectURL(currentObjectUrlRef.current);
+    }
+    currentObjectUrlRef.current = nextUrl;
+    setObjectUrl(nextUrl);
+  };
 
   useEffect(() => {
-    onEditingChange(isEditingImage);
+    return () => {
+      if (currentObjectUrlRef.current) {
+        URL.revokeObjectURL(currentObjectUrlRef.current);
+        currentObjectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setDefaultImgFailed(false);
+    setUsedFallbackDefault(false);
+  }, [defaultImageSrc, slotMeta.mode]);
+
+  useEffect(() => {
+    onEditingChange?.(isEditingImage);
   }, [isEditingImage, onEditingChange]);
 
   useEffect(() => {
@@ -171,106 +347,225 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
     });
   }, [isEditingImage, rotationDeg, aspectPreset, zoomLevel, brightnessPct]);
 
-  const effectiveImgSrc =
-    usedFallback && fallbackDisplaySrc ? fallbackDisplaySrc : displaySrc;
+  // Fetch authenticated binary preview / download blob whenever custom file changes
+  useEffect(() => {
+    if (slotMeta.mode !== 'custom' || !slotMeta.hasCustomFile) {
+      replaceObjectUrl(null);
+      setLoadedStamp(0);
+      return;
+    }
 
-  const saveReplyImagePayload = async (
-    nextMode: ReplyImageMode,
-    dataUrl?: string,
-    successNote?: string
-  ) => {
-    setIsSavingImage(true);
-    setImageFeedback(null);
+    if (slotMeta.updatedAt > 0 && slotMeta.updatedAt === loadedStamp && currentObjectUrlRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingPreview(true);
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/whatsapp/slot-media/${slot}?t=${slotMeta.updatedAt || Date.now()}`,
+          {
+            cache: 'no-store',
+            headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
+          }
+        );
+        if (!res.ok || cancelled) return;
+        const blob = await res.blob();
+        if (cancelled || blob.size === 0) return;
+        const typedBlob =
+          slotMeta.mimeType && blob.type !== slotMeta.mimeType
+            ? new Blob([blob], { type: slotMeta.mimeType })
+            : blob;
+        const nextUrl = URL.createObjectURL(typedBlob);
+        replaceObjectUrl(nextUrl);
+        setLoadedStamp(slotMeta.updatedAt);
+      } catch {
+        // ignore transient preview fetch error
+      } finally {
+        if (!cancelled) {
+          setIsLoadingPreview(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [adminToken, slot, slotMeta.hasCustomFile, slotMeta.mimeType, slotMeta.mode, slotMeta.updatedAt, loadedStamp]);
+
+  const effectiveDefaultSrc =
+    usedFallbackDefault && fallbackDefaultImageSrc
+      ? fallbackDefaultImageSrc
+      : defaultImageSrc || '';
+
+  const isShowingDefaultImage =
+    slotMeta.mode === 'default' && Boolean(slotMeta.hasDefault && effectiveDefaultSrc);
+  const isShowingCustomImage =
+    slotMeta.mode === 'custom' && slotMeta.hasCustomFile && slotMeta.category === 'image';
+  const isShowingCustomVideo =
+    slotMeta.mode === 'custom' && slotMeta.hasCustomFile && slotMeta.category === 'video';
+  const isShowingCustomDocOrPdf =
+    slotMeta.mode === 'custom' &&
+    slotMeta.hasCustomFile &&
+    (slotMeta.category === 'pdf' || slotMeta.category === 'document');
+
+  const activeImageSrcForEditor = isShowingCustomImage
+    ? objectUrl || ''
+    : isShowingDefaultImage
+      ? effectiveDefaultSrc
+      : '';
+
+  const handleUploadAnyFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (file.size === 0) {
+      setFeedback({
+        type: 'error',
+        text: 'Selected file is empty. Please choose a valid file.',
+      });
+      return;
+    }
+
+    if (file.size > MAX_CLIENT_ATTACHMENT_BYTES) {
+      setFeedback({
+        type: 'error',
+        text: `"${file.name}" is ${formatBytesHuman(file.size)}. Please choose a file under 25 MB for WhatsApp delivery.`,
+      });
+      return;
+    }
+
+    const dotIdx = file.name.lastIndexOf('.');
+    const extLower = dotIdx >= 0 ? file.name.slice(dotIdx).toLowerCase() : '';
+    if (extLower && BLOCKED_CLIENT_EXTENSIONS.has(extLower)) {
+      setFeedback({
+        type: 'error',
+        text: `Executable or script files (${extLower}) are blocked for security. Upload any PDF, Image, Video, Office doc, or ZIP file.`,
+      });
+      return;
+    }
+
+    setIsSaving(true);
+    setFeedback(null);
+    setIsEditingImage(false);
+
     try {
-      const res = await fetch('/api/whatsapp/reply-image', {
+      const res = await fetch(`/api/whatsapp/slot-media/${slot}`, {
+        method: 'POST',
+        headers: {
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+          'Content-Type': 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name),
+          'X-File-Mime': file.type || 'application/octet-stream',
+        },
+        body: file,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFeedback({
+          type: 'error',
+          text: data.error || `Could not upload file for Message ${slot}.`,
+        });
+        return;
+      }
+
+      const updatedSlotMeta: SlotMediaStatusPayload | undefined =
+        data.slotMedia?.[String(slot) as '1' | '2' | '3'];
+      const localPreviewUrl = URL.createObjectURL(file);
+      replaceObjectUrl(localPreviewUrl);
+      if (updatedSlotMeta?.updatedAt) {
+        setLoadedStamp(updatedSlotMeta.updatedAt);
+      }
+
+      onUpdated({
+        slotMedia: data.slotMedia,
+        settings: data.settings,
+        justUploadedCustomFile: true,
+      });
+
+      const typeLabel =
+        updatedSlotMeta?.category === 'pdf'
+          ? 'PDF'
+          : updatedSlotMeta?.category === 'video'
+            ? 'Video'
+            : updatedSlotMeta?.category === 'image'
+              ? 'Image'
+              : 'File';
+
+      setFeedback({
+        type: 'success',
+        text: `${typeLabel} "${file.name}" (${formatBytesHuman(file.size)}) attached to Message ${slot} & synced across AI Studio and Railway.`,
+      });
+    } catch {
+      setFeedback({
+        type: 'error',
+        text: `Network error while uploading "${file.name}" to Message ${slot}.`,
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const saveSlotModeOrCanvasImage = async (
+    nextMode: SlotMode,
+    dataUrl?: string,
+    fileName?: string,
+    successNote?: string
+  ): Promise<boolean> => {
+    setIsSaving(true);
+    setFeedback(null);
+    try {
+      const res = await fetch(`/api/whatsapp/slot-media/${slot}/mode`, {
         method: 'POST',
         headers: {
           ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          slot,
           mode: nextMode,
           ...(dataUrl ? { dataUrl } : {}),
+          ...(fileName ? { fileName } : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setImageFeedback({
+        setFeedback({
           type: 'error',
-          text: data.error || `Could not update Message ${slot} WhatsApp image.`,
+          text: data.error || `Could not update Message ${slot} attachment.`,
         });
         return false;
       }
+
+      if (nextMode !== 'custom') {
+        replaceObjectUrl(null);
+        setLoadedStamp(0);
+      }
+
       onUpdated({
-        replyImage: data.replyImage,
-        replyImage2: data.replyImage2,
+        slotMedia: data.slotMedia,
       });
-      setImageFeedback({
+
+      setFeedback({
         type: 'success',
-        text:
-          successNote ||
-          `Message ${slot} image updated and synced in real time across all servers.`,
+        text: successNote || `Message ${slot} attachment updated & synced.`,
       });
       return true;
     } catch {
-      setImageFeedback({
+      setFeedback({
         type: 'error',
-        text: `Network error while saving Message ${slot} image.`,
+        text: `Network error while updating Message ${slot} attachment.`,
       });
       return false;
     } finally {
-      setIsSavingImage(false);
+      setIsSaving(false);
     }
-  };
-
-  const handleUploadNewImage = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
-    if (!file.type.startsWith('image/')) {
-      setImageFeedback({
-        type: 'error',
-        text: 'Please choose a JPG, PNG, or WebP image file.',
-      });
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const rawSrc = typeof reader.result === 'string' ? reader.result : '';
-      if (!rawSrc) return;
-      const img = new Image();
-      img.onload = () => {
-        const offscreen = document.createElement('canvas');
-        drawEditedImageToCanvas(offscreen, img, {
-          rotationDeg: 0,
-          aspectPreset: 'original',
-          zoomLevel: 1,
-          brightnessPct: 100,
-          maxDimension: 1280,
-        });
-        const optimizedDataUrl = offscreen.toDataURL('image/jpeg', 0.88);
-        void saveReplyImagePayload(
-          'custom',
-          optimizedDataUrl,
-          `Message ${slot} image uploaded & synced across AI Studio and Railway.`
-        );
-      };
-      img.onerror = () => {
-        setImageFeedback({
-          type: 'error',
-          text: 'Unable to read that image file. Please try another JPG or PNG.',
-        });
-      };
-      img.src = rawSrc;
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleOpenImageEditor = () => {
-    setImageFeedback(null);
+    if (!activeImageSrcForEditor) return;
+    setFeedback(null);
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
@@ -282,12 +577,12 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
       setIsEditingImage(true);
     };
     img.onerror = () => {
-      setImageFeedback({
+      setFeedback({
         type: 'error',
-        text: 'Please click Change Image to upload a JPG or PNG image first.',
+        text: 'Unable to open image editor for this file. Please upload a JPG, PNG, or WebP image.',
       });
     };
-    img.src = effectiveImgSrc;
+    img.src = activeImageSrcForEditor;
   };
 
   const handleApplyEditedImage = async () => {
@@ -302,9 +597,10 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
       maxDimension: 1280,
     });
     const editedDataUrl = exportCanvas.toDataURL('image/jpeg', 0.88);
-    const ok = await saveReplyImagePayload(
+    const ok = await saveSlotModeOrCanvasImage(
       'custom',
       editedDataUrl,
+      `prestair-message-${slot}.jpg`,
       `Message ${slot} edited image saved & synced in real time.`
     );
     if (ok) {
@@ -312,95 +608,140 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
     }
   };
 
+  const safeDownloadFileName =
+    slotMeta.fileName ||
+    (slotMeta.category === 'pdf'
+      ? `prestair-message-${slot}.pdf`
+      : slotMeta.category === 'video'
+        ? `prestair-message-${slot}.mp4`
+        : `prestair-message-${slot}`);
+
   return (
     <div className="space-y-2.5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs font-semibold text-slate-700">
-          {mode === 'none' ? `${label} (Disabled · Text-Only)` : label}
-        </p>
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-600 min-w-0">
+          <span className="font-semibold text-slate-700">
+            {slotMeta.mode === 'none'
+              ? `${label} (No File · Text Only)`
+              : slotMeta.mode === 'default'
+                ? `${label} (Default Image)`
+                : label}
+          </span>
+          {slotMeta.mode === 'custom' && slotMeta.hasCustomFile && slotMeta.fileName && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="truncate max-w-44 font-medium text-slate-800">
+                {slotMeta.fileName}
+              </span>
+              {slotMeta.byteLength > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="tabular-nums">{formatBytesHuman(slotMeta.byteLength)}</span>
+                </>
+              )}
+            </>
+          )}
+        </div>
 
+        {/* Unrestricted file input so PDF, Image, Video, Word, Excel, ZIP, HEIC, MOV, etc. are ALL selectable */}
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/webp"
-          onChange={handleUploadNewImage}
+          onChange={(e) => void handleUploadAnyFile(e)}
           className="hidden"
         />
 
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
-            disabled={isSavingImage}
+            disabled={isSaving}
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
-            <ImagePlus className="h-3.5 w-3.5 text-sky-700" />
-            <span>Change Image</span>
+            {isSaving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-700" />
+            ) : (
+              <Upload className="h-3.5 w-3.5 text-sky-700" />
+            )}
+            <span>
+              {slotMeta.mode === 'custom' && slotMeta.hasCustomFile
+                ? 'Replace File'
+                : 'Upload File (PDF / Image / Video)'}
+            </span>
           </button>
 
-          {mode !== 'none' && !imgLoadFailed && !isEditingImage && (
-            <button
-              type="button"
-              disabled={isSavingImage}
-              onClick={handleOpenImageEditor}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <Pencil className="h-3.5 w-3.5 text-emerald-700" />
-              <span>Edit Image</span>
-            </button>
-          )}
+          {(isShowingDefaultImage || isShowingCustomImage) &&
+            Boolean(activeImageSrcForEditor) &&
+            !defaultImgFailed &&
+            !isEditingImage && (
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={handleOpenImageEditor}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Pencil className="h-3.5 w-3.5 text-emerald-700" />
+                <span>Edit Image</span>
+              </button>
+            )}
 
-          {mode !== 'default' && !isEditingImage && (
+          {slotMeta.hasDefault && slotMeta.mode !== 'default' && !isEditingImage && (
             <button
               type="button"
-              disabled={isSavingImage}
+              disabled={isSaving}
               onClick={() =>
-                void saveReplyImagePayload(
+                void saveSlotModeOrCanvasImage(
                   'default',
                   undefined,
-                  `Restored default image for Message ${slot}.`
+                  undefined,
+                  `Restored default Prestair image for Message ${slot}.`
                 )
               }
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-sky-700 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-sky-700 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               <RotateCcw className="h-3 w-3" />
               <span>Default</span>
             </button>
           )}
 
-          {mode !== 'none' && !isEditingImage && (
+          {slotMeta.mode !== 'none' && !isEditingImage && (
             <button
               type="button"
-              disabled={isSavingImage}
+              disabled={isSaving}
               onClick={() =>
-                void saveReplyImagePayload(
+                void saveSlotModeOrCanvasImage(
                   'none',
                   undefined,
-                  `Removed image from Message ${slot} (will send text only).`
+                  undefined,
+                  `Removed file from Message ${slot} (will send text caption only).`
                 )
               }
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 disabled:opacity-50 text-slate-600 hover:text-rose-700 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 disabled:opacity-50 text-slate-600 hover:text-rose-700 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               <Trash2 className="h-3.5 w-3.5" />
-              <span>No Image</span>
+              <span>No File</span>
             </button>
           )}
         </div>
       </div>
 
       {!isEditingImage ? (
-        <div className="max-w-sm">
-          {mode !== 'none' && !imgLoadFailed ? (
-            <div className="group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50 aspect-[16/10]">
+        <div className="max-w-md">
+          {isShowingDefaultImage && !defaultImgFailed ? (
+            <div className="group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50 aspect-[16/10] max-w-sm">
               <img
-                src={effectiveImgSrc}
-                alt={`Prestair WhatsApp Message ${slot} Attachment`}
+                src={effectiveDefaultSrc}
+                alt={`Prestair WhatsApp Message ${slot} Default Image`}
                 referrerPolicy="no-referrer"
                 onError={() => {
-                  if (!usedFallback && fallbackDisplaySrc && fallbackDisplaySrc !== displaySrc) {
-                    setUsedFallback(true);
+                  if (
+                    !usedFallbackDefault &&
+                    fallbackDefaultImageSrc &&
+                    fallbackDefaultImageSrc !== defaultImageSrc
+                  ) {
+                    setUsedFallbackDefault(true);
                   } else {
-                    setImgLoadFailed(true);
+                    setDefaultImgFailed(true);
                   }
                 }}
                 className="h-full w-full object-cover"
@@ -408,28 +749,130 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="absolute inset-0 bg-slate-950/0 group-hover:bg-slate-950/35 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-all cursor-pointer"
+                className="absolute inset-0 bg-slate-950/0 group-hover:bg-slate-950/40 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity cursor-pointer"
               >
-                <span className="inline-flex items-center gap-1.5 rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-900 shadow-sm">
-                  <ImagePlus className="h-3.5 w-3.5 text-sky-700" />
-                  <span>Click to Replace Image</span>
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-900 shadow-sm whitespace-nowrap">
+                  <Upload className="h-3.5 w-3.5 text-sky-700" />
+                  <span>Upload PDF, Image, Video or Any File</span>
                 </span>
               </button>
             </div>
+          ) : isShowingCustomImage ? (
+            <div className="group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50 aspect-[16/10] max-w-sm flex items-center justify-center">
+              {objectUrl ? (
+                <>
+                  <img
+                    src={objectUrl}
+                    alt={slotMeta.fileName || `Message ${slot} Attached Image`}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="absolute inset-0 bg-slate-950/0 group-hover:bg-slate-950/40 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-1.5 rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-900 shadow-sm whitespace-nowrap">
+                      <Upload className="h-3.5 w-3.5 text-sky-700" />
+                      <span>Replace with Any File (PDF / Image / Video)</span>
+                    </span>
+                  </button>
+                </>
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-slate-500 px-4">
+                  <Loader2
+                    className={`h-4 w-4 text-sky-600 shrink-0 ${
+                      isLoadingPreview ? 'animate-spin' : ''
+                    }`}
+                  />
+                  <span>Loading synced image preview…</span>
+                </div>
+              )}
+            </div>
+          ) : isShowingCustomVideo ? (
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-slate-950 aspect-[16/10] max-w-sm flex items-center justify-center">
+              {objectUrl ? (
+                <video
+                  key={objectUrl}
+                  src={objectUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  className="h-full w-full object-contain bg-slate-950"
+                />
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-slate-300 px-4 text-center">
+                  <Loader2
+                    className={`h-4 w-4 text-sky-400 shrink-0 ${
+                      isLoadingPreview ? 'animate-spin' : ''
+                    }`}
+                  />
+                  <span>Loading synced video preview…</span>
+                </div>
+              )}
+            </div>
+          ) : isShowingCustomDocOrPdf ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <div
+                  className={`h-10 w-10 rounded-lg border flex items-center justify-center shrink-0 ${
+                    slotMeta.category === 'pdf'
+                      ? 'bg-rose-50 border-rose-200 text-rose-700'
+                      : 'bg-sky-50 border-sky-200 text-sky-700'
+                  }`}
+                >
+                  {slotMeta.category === 'pdf' ? (
+                    <FileText className="h-5 w-5" />
+                  ) : getFileExtensionUpper(slotMeta.fileName).match(/^(XLS|XLSX|CSV|ODS)$/) ? (
+                    <FileSpreadsheet className="h-5 w-5" />
+                  ) : (
+                    <Paperclip className="h-5 w-5" />
+                  )}
+                </div>
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-xs font-bold text-slate-900 truncate">
+                    {slotMeta.fileName || `Message-${slot}-Attachment`}
+                  </p>
+                  <p className="text-xs text-slate-600 tabular-nums">
+                    {slotMeta.category === 'pdf'
+                      ? 'PDF Catalogue / Document'
+                      : `${getFileExtensionUpper(slotMeta.fileName)} File Attachment`}{' '}
+                    · {formatBytesHuman(slotMeta.byteLength)}
+                  </p>
+                  <p className="text-[11px] text-emerald-800">
+                    Delivers on WhatsApp with filename + text caption below
+                  </p>
+                </div>
+              </div>
+
+              {objectUrl && (
+                <a
+                  href={objectUrl}
+                  download={safeDownloadFileName}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold px-2.5 py-1.5 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Download className="h-3.5 w-3.5 text-sky-700" />
+                  <span>Check File</span>
+                </a>
+              )}
+            </div>
           ) : (
-            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-center space-y-2">
+            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-center space-y-2 max-w-sm">
               <p className="text-xs font-medium text-slate-600">
-                {mode === 'none'
-                  ? `No image attached to Message ${slot}.`
-                  : `Upload an image to attach with Message ${slot}.`}
+                Upload <strong className="font-semibold text-slate-800">PDF, Image, Video, Word/Excel, or any file</strong> (up to 25 MB) for Message {slot}.
               </p>
               <button
                 type="button"
+                disabled={isSaving}
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold px-3 py-1.5 transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
               >
-                <ImagePlus className="h-3.5 w-3.5" />
-                <span>Upload Image</span>
+                {isSaving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+                <span>Choose Any File (PDF / Image / Video)</span>
               </button>
             </div>
           )}
@@ -530,11 +973,11 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
             </button>
             <button
               type="button"
-              disabled={isSavingImage}
+              disabled={isSaving}
               onClick={() => void handleApplyEditedImage()}
               className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-semibold px-3.5 py-1.5 cursor-pointer"
             >
-              {isSavingImage ? (
+              {isSaving ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
                 <Check className="h-3.5 w-3.5" />
@@ -545,15 +988,19 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
         </div>
       )}
 
-      {imageFeedback && (
+      <p className="text-[11px] text-slate-500">
+        Supported formats: PDF, JPG, PNG, WebP, HEIC, MP4, MOV, WebM, Word, Excel, PPT, ZIP &amp; all standard files up to 25 MB.
+      </p>
+
+      {feedback && (
         <p
           className={`text-xs font-medium rounded-lg px-3 py-2 border ${
-            imageFeedback.type === 'error'
+            feedback.type === 'error'
               ? 'text-rose-700 bg-rose-50 border-rose-200'
               : 'text-emerald-800 bg-emerald-50 border-emerald-200'
           }`}
         >
-          {imageFeedback.text}
+          {feedback.text}
         </p>
       )}
     </div>
@@ -575,36 +1022,55 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
   const [testPhone, setTestPhone] = useState('');
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testFeedback, setTestFeedback] = useState<string | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsFeedback, setSettingsFeedback] = useState<string | null>(null);
 
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(true);
+  const [firstMessageEnabled, setFirstMessageEnabled] = useState(true);
   const [messageTemplate, setMessageTemplate] = useState(DEFAULT_PRESTAIR_WHATSAPP_REPLY);
   const [secondMessageEnabled, setSecondMessageEnabled] = useState(true);
   const [secondMessageTemplate, setSecondMessageTemplate] = useState(
     DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY
   );
+  const [thirdMessageEnabled, setThirdMessageEnabled] = useState(true);
+  const [thirdMessageTemplate, setThirdMessageTemplate] = useState(
+    DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY
+  );
   const [adminNotifyPhone, setAdminNotifyPhone] = useState('');
   const [showUnlinkConfirm, setShowUnlinkConfirm] = useState(false);
   const [isEditingSettings, setIsEditingSettings] = useState(false);
 
-  // Message 1 & Message 2 Image States
-  const [replyImageMode, setReplyImageMode] = useState<ReplyImageMode>('default');
-  const [customReplyImageUrl, setCustomReplyImageUrl] = useState<string | null>(null);
-  const [replyImage2Mode, setReplyImage2Mode] = useState<ReplyImageMode>('default');
-  const [customReplyImage2Url, setCustomReplyImage2Url] = useState<string | null>(null);
+  // Unified 3-Slot Attachment State (PDF / Image / Video / Any File across all 3 messages)
+  const [slot1Meta, setSlot1Meta] = useState<SlotMediaStatusPayload>(() =>
+    buildFallbackSlotMeta(1, null)
+  );
+  const [slot2Meta, setSlot2Meta] = useState<SlotMediaStatusPayload>(() =>
+    buildFallbackSlotMeta(2, null)
+  );
+  const [slot3Meta, setSlot3Meta] = useState<SlotMediaStatusPayload>(() =>
+    buildFallbackSlotMeta(3, null)
+  );
 
   const [isEditingImage1, setIsEditingImage1] = useState(false);
   const [isEditingImage2, setIsEditingImage2] = useState(false);
+  const [isEditingImage3, setIsEditingImage3] = useState(false);
 
-  const activeDisplayImage1Src =
-    replyImageMode === 'custom' && customReplyImageUrl
-      ? customReplyImageUrl
-      : PRESTAIR_REPLY_IMAGES[0];
-
-  const activeDisplayImage2Src =
-    replyImage2Mode === 'custom' && customReplyImage2Url
-      ? customReplyImage2Url
-      : PRESTAIR_SECOND_REPLY_IMAGES[0];
+  const applySlotMediaMap = (
+    map?: Record<'1' | '2' | '3', SlotMediaStatusPayload>,
+    fullStatus?: WhatsAppStatusPayload
+  ) => {
+    if (map) {
+      if (!isEditingImage1 && map['1']) setSlot1Meta(map['1']);
+      if (!isEditingImage2 && map['2']) setSlot2Meta(map['2']);
+      if (!isEditingImage3 && map['3']) setSlot3Meta(map['3']);
+      return;
+    }
+    if (fullStatus) {
+      if (!isEditingImage1) setSlot1Meta(buildFallbackSlotMeta(1, fullStatus));
+      if (!isEditingImage2) setSlot2Meta(buildFallbackSlotMeta(2, fullStatus));
+      if (!isEditingImage3) setSlot3Meta(buildFallbackSlotMeta(3, fullStatus));
+    }
+  };
 
   const fetchWhatsAppStatus = async (syncFormFields = false) => {
     try {
@@ -617,6 +1083,11 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
       setWaStatus(data);
       if ((syncFormFields || !isEditingSettings) && data.settings) {
         setAutoReplyEnabled(data.settings.autoReplyEnabled);
+        setFirstMessageEnabled(
+          typeof data.settings.firstMessageEnabled === 'boolean'
+            ? data.settings.firstMessageEnabled
+            : true
+        );
         setMessageTemplate(data.settings.messageTemplate || DEFAULT_PRESTAIR_WHATSAPP_REPLY);
         setSecondMessageEnabled(
           typeof data.settings.secondMessageEnabled === 'boolean'
@@ -626,16 +1097,17 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
         setSecondMessageTemplate(
           data.settings.secondMessageTemplate || DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY
         );
+        setThirdMessageEnabled(
+          typeof data.settings.thirdMessageEnabled === 'boolean'
+            ? data.settings.thirdMessageEnabled
+            : true
+        );
+        setThirdMessageTemplate(
+          data.settings.thirdMessageTemplate || DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY
+        );
         setAdminNotifyPhone(data.settings.adminNotifyPhone || '');
       }
-      if (!isEditingImage1 && data.replyImage) {
-        setReplyImageMode(data.replyImage.mode);
-        setCustomReplyImageUrl(data.replyImage.customDataUrl);
-      }
-      if (!isEditingImage2 && data.replyImage2) {
-        setReplyImage2Mode(data.replyImage2.mode);
-        setCustomReplyImage2Url(data.replyImage2.customDataUrl);
-      }
+      applySlotMediaMap(data.slotMedia, data);
     } catch {
       // ignore transient network error
     }
@@ -648,7 +1120,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
       void fetchWhatsAppStatus(false);
     }, 3500);
     return () => clearInterval(interval);
-  }, [adminToken, isEditingSettings, isEditingImage1, isEditingImage2]);
+  }, [adminToken, isEditingSettings, isEditingImage1, isEditingImage2, isEditingImage3]);
 
   const handleStartWhatsApp = async (usePairingPhone = false) => {
     setIsLoadingWa(true);
@@ -686,29 +1158,83 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
     }
   };
 
+  const activeMessageCount =
+    (firstMessageEnabled ? 1 : 0) +
+    (secondMessageEnabled ? 1 : 0) +
+    (thirdMessageEnabled ? 1 : 0);
+
+  const selectedSummaryParts: string[] = [];
+  if (firstMessageEnabled) selectedSummaryParts.push(`Msg 1 (${describeSlotShortLabel(slot1Meta)})`);
+  if (secondMessageEnabled) selectedSummaryParts.push(`Msg 2 (${describeSlotShortLabel(slot2Meta)})`);
+  if (thirdMessageEnabled) selectedSummaryParts.push(`Msg 3 (${describeSlotShortLabel(slot3Meta)})`);
+
+  const isPreset1Active =
+    firstMessageEnabled && !secondMessageEnabled && !thirdMessageEnabled;
+  const isPreset2Active =
+    firstMessageEnabled && secondMessageEnabled && !thirdMessageEnabled;
+  const isPreset3Active =
+    firstMessageEnabled && secondMessageEnabled && thirdMessageEnabled;
+
+  const applyMessageCountPreset = (count: 1 | 2 | 3) => {
+    setIsEditingSettings(true);
+    setSettingsFeedback(null);
+    if (count === 1) {
+      setFirstMessageEnabled(true);
+      setSecondMessageEnabled(false);
+      setThirdMessageEnabled(false);
+    } else if (count === 2) {
+      setFirstMessageEnabled(true);
+      setSecondMessageEnabled(true);
+      setThirdMessageEnabled(false);
+    } else {
+      setFirstMessageEnabled(true);
+      setSecondMessageEnabled(true);
+      setThirdMessageEnabled(true);
+    }
+  };
+
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSettingsFeedback(null);
-    const res = await fetch('/api/whatsapp/settings', {
-      method: 'POST',
-      headers: {
-        ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        autoReplyEnabled,
-        messageTemplate,
-        secondMessageEnabled,
-        secondMessageTemplate,
-        adminNotifyPhone,
-      }),
-    });
-    if (res.ok) {
-      setIsEditingSettings(false);
+    if (!firstMessageEnabled && !secondMessageEnabled && !thirdMessageEnabled) {
       setSettingsFeedback(
-        'Both WhatsApp messages & automation settings saved and synced in real time across AI Studio & Railway.'
+        'Please select at least 1 message (1 Message, 2 Messages, or All 3 Messages) before saving.'
       );
-      void fetchWhatsAppStatus(true);
+      return;
+    }
+    setIsSavingSettings(true);
+    try {
+      const res = await fetch('/api/whatsapp/settings', {
+        method: 'POST',
+        headers: {
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          autoReplyEnabled,
+          firstMessageEnabled,
+          messageTemplate,
+          secondMessageEnabled,
+          secondMessageTemplate,
+          thirdMessageEnabled,
+          thirdMessageTemplate,
+          adminNotifyPhone,
+        }),
+      });
+      if (res.ok) {
+        setIsEditingSettings(false);
+        setSettingsFeedback(
+          `Saved! WhatsApp automation will send ${activeMessageCount} message${
+            activeMessageCount === 1 ? '' : 's'
+          } (${selectedSummaryParts.join(' · ')}) across AI Studio & Railway.`
+        );
+        void fetchWhatsAppStatus(true);
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setSettingsFeedback(errData.error || 'Could not save WhatsApp automation settings.');
+      }
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -726,20 +1252,23 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
         },
         body: JSON.stringify({
           phone: testPhone.trim(),
+          sendFirst: firstMessageEnabled,
           text: messageTemplate,
           sendSecond: secondMessageEnabled,
           secondText: secondMessageTemplate,
+          sendThird: thirdMessageEnabled,
+          thirdText: thirdMessageTemplate,
         }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        const msgCountLabel = secondMessageEnabled
-          ? 'both 2 separate Image + Text messages'
-          : 'Message 1 (Image + Text)';
+        const countLabel = `${activeMessageCount} message${
+          activeMessageCount === 1 ? '' : 's'
+        } (${selectedSummaryParts.join(' + ')})`;
         setTestFeedback(
           data.relayedViaCloud
-            ? `Queued ${msgCountLabel} via active 24x7 Cloud Worker for ${testPhone.trim()}.`
-            : `Delivered ${msgCountLabel} to ${testPhone.trim()}.`
+            ? `Queued ${countLabel} via active 24x7 Cloud Worker for ${testPhone.trim()}.`
+            : `Delivered ${countLabel} to ${testPhone.trim()}.`
         );
       } else {
         setTestFeedback(data.error || 'Could not dispatch test messages.');
@@ -903,10 +1432,13 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
             htmlFor="wa-test-phone"
             className="block text-sm font-bold text-slate-900"
           >
-            Send Test Confirmation (2 Separate Image + Text Messages)
+            Send Test Confirmation ({activeMessageCount} Selected Message
+            {activeMessageCount === 1 ? '' : 's'})
           </label>
           <p className="text-xs text-slate-600">
-            Verify instant delivery of Message 1 (Image + Text) and Message 2 (Image + Text) to any WhatsApp number.
+            {activeMessageCount > 0
+              ? `Verify instant delivery of ${selectedSummaryParts.join(' → ')} to any WhatsApp number.`
+              : 'Select at least 1 message on the right to send a test confirmation.'}
           </p>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
             <input
@@ -919,7 +1451,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
             />
             <button
               type="submit"
-              disabled={isSendingTest || !testPhone.trim()}
+              disabled={isSendingTest || !testPhone.trim() || activeMessageCount === 0}
               className="min-h-11 sm:min-h-9 inline-flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               {isSendingTest ? (
@@ -938,7 +1470,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
         </form>
       </div>
 
-      {/* Right Column: Real-Time Synced 2-Message Auto-Reply Settings */}
+      {/* Right Column: Real-Time Synced 1 / 2 / 3-Message Universal File Auto-Reply Settings */}
       <div className="lg:col-span-7">
         <form
           onSubmit={handleSaveSettings}
@@ -947,10 +1479,10 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5">
             <div>
               <h3 className="font-display text-sm font-bold text-slate-900">
-                Customer WhatsApp Confirmations — 2 Separate Image + Text Messages
+                Customer WhatsApp Automation — PDF, Image, Video &amp; Any File
               </h3>
               <p className="text-xs text-slate-600">
-                Synced in real time across AI Studio &amp; Railway—both separate messages are sent automatically when a customer submits the form.
+                Attach any file format (PDF, Image, Video, Doc) to Messages 1, 2 &amp; 3 and choose 1, 2, or all 3 messages below.
               </p>
             </div>
             <label className="min-h-9 inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer shrink-0">
@@ -967,23 +1499,108 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
             </label>
           </div>
 
-          {/* MESSAGE 1: First Separate Image + Text Confirmation */}
-          <div className="space-y-3 pb-5 border-b border-slate-200">
-            <h4 className="font-display text-xs sm:text-sm font-bold text-slate-900">
-              01. First WhatsApp Message (Image 1 + Text 1)
-            </h4>
+          {/* 1 / 2 / 3 Active Messages Preset Selector + Quick Save */}
+          <div className="space-y-2.5 pb-4 border-b border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-bold text-slate-900">
+                How Many WhatsApp Messages Should Go to the Customer?
+              </p>
+              <span className="text-xs text-slate-500 tabular-nums">
+                {activeMessageCount > 0
+                  ? `${activeMessageCount} of 3 selected`
+                  : '0 selected'}
+              </span>
+            </div>
 
-            <ReplyImageEditorSection
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="grid grid-cols-3 sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => applyMessageCountPreset(1)}
+                  className={`min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    isPreset1Active
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  1 Message
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyMessageCountPreset(2)}
+                  className={`min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    isPreset2Active
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  2 Messages
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyMessageCountPreset(3)}
+                  className={`min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    isPreset3Active
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  All 3 Messages
+                </button>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSavingSettings || activeMessageCount === 0}
+                className="min-h-9 w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-semibold px-3.5 py-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {isSavingSettings ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Check className="h-3.5 w-3.5" />
+                )}
+                <span>Save Selection</span>
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              {selectedSummaryParts.length > 0
+                ? `Active sequence: ${selectedSummaryParts.join(' · ')}`
+                : 'No messages selected—enable 1, 2, or all 3 messages above.'}
+            </p>
+          </div>
+
+          {/* MESSAGE 1: First Separate File (Image / PDF / Video / Any File) + Text Confirmation */}
+          <div className="space-y-3 pb-5 border-b border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-display text-xs sm:text-sm font-bold text-slate-900">
+                01. First WhatsApp Message (Image / PDF / Video + Text 1)
+              </h4>
+              <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={firstMessageEnabled}
+                  onChange={(e) => {
+                    setIsEditingSettings(true);
+                    setFirstMessageEnabled(e.target.checked);
+                  }}
+                  className="h-4 w-4 accent-emerald-600 rounded"
+                />
+                <span>Send 1st Message</span>
+              </label>
+            </div>
+
+            <ReplyAttachmentEditorSection
               slot={1}
-              label="Message 1 Attached Image"
-              mode={replyImageMode}
-              displaySrc={activeDisplayImage1Src}
+              label="Message 1 Attachment"
+              slotMeta={slot1Meta}
+              defaultImageSrc={PRESTAIR_REPLY_IMAGES[0]}
               adminToken={adminToken}
               onEditingChange={setIsEditingImage1}
-              onUpdated={(payload) => {
-                if (payload.replyImage) {
-                  setReplyImageMode(payload.replyImage.mode);
-                  setCustomReplyImageUrl(payload.replyImage.customDataUrl);
+              onUpdated={({ slotMedia, settings, justUploadedCustomFile }) => {
+                if (slotMedia) applySlotMediaMap(slotMedia);
+                if (justUploadedCustomFile || settings?.firstMessageEnabled) {
+                  setFirstMessageEnabled(true);
                 }
               }}
             />
@@ -1010,7 +1627,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
               </div>
               <textarea
                 id="wa-template-input-1"
-                rows={7}
+                rows={6}
                 value={messageTemplate}
                 onChange={(e) => {
                   setIsEditingSettings(true);
@@ -1021,11 +1638,11 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
             </div>
           </div>
 
-          {/* MESSAGE 2: Second Separate Image + Text Confirmation */}
+          {/* MESSAGE 2: Second Separate File (PDF / Image / Video / Any File) + Text Confirmation */}
           <div className="space-y-3 pb-5 border-b border-slate-200">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="font-display text-xs sm:text-sm font-bold text-slate-900">
-                02. Second WhatsApp Message (Image 2 + Text 2)
+                02. Second WhatsApp Message (PDF / Image / Video + Text 2)
               </h4>
               <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
                 <input
@@ -1041,20 +1658,18 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
               </label>
             </div>
 
-            <ReplyImageEditorSection
+            <ReplyAttachmentEditorSection
               slot={2}
-              label="Message 2 Attached Image"
-              mode={replyImage2Mode}
-              displaySrc={activeDisplayImage2Src}
-              fallbackDisplaySrc={
-                replyImageMode !== 'none' ? activeDisplayImage1Src : null
-              }
+              label="Message 2 Attachment"
+              slotMeta={slot2Meta}
+              defaultImageSrc={PRESTAIR_SECOND_REPLY_IMAGES[0]}
+              fallbackDefaultImageSrc={PRESTAIR_REPLY_IMAGES[0]}
               adminToken={adminToken}
               onEditingChange={setIsEditingImage2}
-              onUpdated={(payload) => {
-                if (payload.replyImage2) {
-                  setReplyImage2Mode(payload.replyImage2.mode);
-                  setCustomReplyImage2Url(payload.replyImage2.customDataUrl);
+              onUpdated={({ slotMedia, settings, justUploadedCustomFile }) => {
+                if (slotMedia) applySlotMediaMap(slotMedia);
+                if (justUploadedCustomFile || settings?.secondMessageEnabled) {
+                  setSecondMessageEnabled(true);
                 }
               }}
             />
@@ -1081,11 +1696,78 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
               </div>
               <textarea
                 id="wa-template-input-2"
-                rows={6}
+                rows={5}
                 value={secondMessageTemplate}
                 onChange={(e) => {
                   setIsEditingSettings(true);
                   setSecondMessageTemplate(e.target.value);
+                }}
+                className="w-full rounded-lg border border-slate-300 bg-white p-3 text-base sm:text-xs text-slate-900 leading-relaxed focus:outline-none focus:border-sky-600"
+              />
+            </div>
+          </div>
+
+          {/* MESSAGE 3: Third Separate File (Video / PDF / Image / Any File) + Text Confirmation */}
+          <div className="space-y-3 pb-5 border-b border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-display text-xs sm:text-sm font-bold text-slate-900">
+                03. Third WhatsApp Message (Video / PDF / Image + Text 3)
+              </h4>
+              <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={thirdMessageEnabled}
+                  onChange={(e) => {
+                    setIsEditingSettings(true);
+                    setThirdMessageEnabled(e.target.checked);
+                  }}
+                  className="h-4 w-4 accent-emerald-600 rounded"
+                />
+                <span>Send 3rd Message</span>
+              </label>
+            </div>
+
+            <ReplyAttachmentEditorSection
+              slot={3}
+              label="Message 3 Attachment"
+              slotMeta={slot3Meta}
+              adminToken={adminToken}
+              onEditingChange={setIsEditingImage3}
+              onUpdated={({ slotMedia, settings, justUploadedCustomFile }) => {
+                if (slotMedia) applySlotMediaMap(slotMedia);
+                if (justUploadedCustomFile || settings?.thirdMessageEnabled) {
+                  setThirdMessageEnabled(true);
+                }
+              }}
+            />
+
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                <label
+                  htmlFor="wa-template-input-3"
+                  className="block text-xs font-semibold text-slate-700"
+                >
+                  Message 3 Text Caption
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditingSettings(true);
+                    setThirdMessageTemplate(DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY);
+                  }}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-800 cursor-pointer whitespace-nowrap"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  <span>Restore Default Message 3</span>
+                </button>
+              </div>
+              <textarea
+                id="wa-template-input-3"
+                rows={5}
+                value={thirdMessageTemplate}
+                onChange={(e) => {
+                  setIsEditingSettings(true);
+                  setThirdMessageTemplate(e.target.value);
                 }}
                 className="w-full rounded-lg border border-slate-300 bg-white p-3 text-base sm:text-xs text-slate-900 leading-relaxed focus:outline-none focus:border-sky-600"
               />
@@ -1136,9 +1818,18 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
 
           <button
             type="submit"
-            className="w-full min-h-11 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold py-2.5 px-4 transition-colors cursor-pointer whitespace-nowrap"
+            disabled={isSavingSettings || activeMessageCount === 0}
+            className="w-full min-h-11 inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-semibold py-2.5 px-4 transition-colors cursor-pointer whitespace-nowrap"
           >
-            Save Both WhatsApp Messages &amp; Settings
+            {isSavingSettings ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Check className="h-4 w-4" />
+            )}
+            <span>
+              Save WhatsApp Automation ({activeMessageCount} Message
+              {activeMessageCount === 1 ? '' : 's'} Selected)
+            </span>
           </button>
         </form>
       </div>

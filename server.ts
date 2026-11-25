@@ -25,6 +25,7 @@ import QRCode from 'qrcode';
 import {
   buildWhatsAppConfirmationMessage,
   DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+  DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY,
   DEFAULT_PRESTAIR_WHATSAPP_REPLY,
   formatLeadForSheetRow,
   generateLeadId,
@@ -66,6 +67,7 @@ const ADMIN_SESSIONS_FILE = path.join(DATA_DIR, 'admin-sessions.json');
 const WA_SETTINGS_FILE = path.join(DATA_DIR, 'whatsapp-settings.json');
 const WA_REPLY_IMAGE_FILE = path.join(DATA_DIR, 'whatsapp-reply-image.json');
 const WA_REPLY_IMAGE_2_FILE = path.join(DATA_DIR, 'whatsapp-reply-image-2.json');
+const WA_REPLY_VIDEO_3_FILE = path.join(DATA_DIR, 'whatsapp-reply-video-3.json');
 const SHOWCASE_SETTINGS_FILE = path.join(DATA_DIR, 'showcase-settings.json');
 const SHEET_SYNC_FILE = path.join(DATA_DIR, 'sheet-sync-settings.json');
 
@@ -268,12 +270,15 @@ function clearFailedAuthAttempts(ip: string): void {
   authAttemptTracker.delete(ip);
 }
 
-// 4. WhatsApp Automation Settings (2 Separate Image + Text Confirmation Messages)
+// 4. WhatsApp Automation Settings (Up to 3 Separate Messages: Image 1 + Image 2 + Video 3)
 interface WhatsAppSettings {
   autoReplyEnabled: boolean;
+  firstMessageEnabled: boolean;
   messageTemplate: string;
   secondMessageEnabled: boolean;
   secondMessageTemplate: string;
+  thirdMessageEnabled: boolean;
+  thirdMessageTemplate: string;
   adminNotifyPhone: string;
   updatedAt: number;
 }
@@ -283,6 +288,8 @@ let waSettings: WhatsAppSettings = (() => {
   return {
     autoReplyEnabled:
       typeof raw.autoReplyEnabled === 'boolean' ? raw.autoReplyEnabled : true,
+    firstMessageEnabled:
+      typeof raw.firstMessageEnabled === 'boolean' ? raw.firstMessageEnabled : true,
     messageTemplate:
       typeof raw.messageTemplate === 'string' && raw.messageTemplate.trim()
         ? raw.messageTemplate.slice(0, 4000)
@@ -293,6 +300,12 @@ let waSettings: WhatsAppSettings = (() => {
       typeof raw.secondMessageTemplate === 'string' && raw.secondMessageTemplate.trim()
         ? raw.secondMessageTemplate.slice(0, 4000)
         : DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+    thirdMessageEnabled:
+      typeof raw.thirdMessageEnabled === 'boolean' ? raw.thirdMessageEnabled : true,
+    thirdMessageTemplate:
+      typeof raw.thirdMessageTemplate === 'string' && raw.thirdMessageTemplate.trim()
+        ? raw.thirdMessageTemplate.slice(0, 4000)
+        : DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY,
     adminNotifyPhone:
       typeof raw.adminNotifyPhone === 'string'
         ? sanitizeField(raw.adminNotifyPhone, 32)
@@ -417,6 +430,676 @@ function getReplyImageStatusPayload(imgState: WhatsAppReplyImageState = waReplyI
         ? `data:${imgState.mimeType};base64,${imgState.base64Data}`
         : null,
     updatedAt: imgState.updatedAt,
+  };
+}
+
+// 4a-video. Message #3 Attached Video State (MP4 / WebM / MOV up to 15 MB, chunked RTDB sync)
+type WaReplyVideoMode = 'custom' | 'none';
+
+interface WhatsAppReplyVideoState {
+  mode: WaReplyVideoMode;
+  mimeType: string;
+  fileName: string;
+  byteLength: number;
+  base64Data: string;
+  updatedAt: number;
+}
+
+interface WhatsAppReplyVideoRtdbMeta {
+  mode: WaReplyVideoMode;
+  mimeType: string;
+  fileName: string;
+  byteLength: number;
+  chunkCount: number;
+  updatedAt: number;
+}
+
+const MAX_REPLY_VIDEO_BYTES = 15 * 1024 * 1024; // 15 MB
+const VIDEO_RTDB_CHUNK_CHARS = 1_000_000; // ~1 MB per RTDB chunk (well below 10 MB string limit)
+
+function sanitizeVideoFileName(rawName: unknown): string {
+  if (typeof rawName !== 'string') return 'prestair-showcase.mp4';
+  const cleaned = sanitizeField(rawName, 120).replace(/[/\\:*?"<>|]/g, '_').trim();
+  return cleaned || 'prestair-showcase.mp4';
+}
+
+function validateVideoBinaryMagic(mimeType: string, buf: Buffer): boolean {
+  if (buf.length < 64 || buf.length > MAX_REPLY_VIDEO_BYTES) return false;
+  if (mimeType === 'video/mp4' || mimeType === 'video/quicktime') {
+    const boxType = buf.subarray(4, 8).toString('ascii');
+    return (
+      boxType === 'ftyp' ||
+      boxType === 'moov' ||
+      boxType === 'mdat' ||
+      boxType === 'wide' ||
+      boxType === 'free' ||
+      boxType === 'skip' ||
+      boxType === 'styp'
+    );
+  }
+  if (mimeType === 'video/webm') {
+    return (
+      buf[0] === 0x1a &&
+      buf[1] === 0x45 &&
+      buf[2] === 0xdf &&
+      buf[3] === 0xa3
+    );
+  }
+  return false;
+}
+
+function parseAndValidateReplyVideoDataUrl(
+  rawDataUrl: string
+):
+  | { valid: true; mimeType: string; base64Data: string; byteLength: number }
+  | { valid: false; error: string } {
+  const trimmed = rawDataUrl.trim();
+  const match = trimmed.match(
+    /^data:(video\/mp4|video\/webm|video\/quicktime);base64,([A-Za-z0-9+/=\s]+)$/
+  );
+  if (!match) {
+    return {
+      valid: false,
+      error: 'Only MP4, WebM, or MOV video files are supported.',
+    };
+  }
+  const mimeType = match[1];
+  const cleanBase64 = match[2].replace(/\s+/g, '');
+  const buf = Buffer.from(cleanBase64, 'base64');
+  if (buf.length > MAX_REPLY_VIDEO_BYTES) {
+    return {
+      valid: false,
+      error: 'Video size must be under 15 MB for reliable WhatsApp delivery.',
+    };
+  }
+  if (!validateVideoBinaryMagic(mimeType, buf)) {
+    return {
+      valid: false,
+      error: 'Invalid or corrupted video file. Please upload a standard MP4, WebM, or MOV video.',
+    };
+  }
+  return {
+    valid: true,
+    mimeType,
+    base64Data: cleanBase64,
+    byteLength: buf.length,
+  };
+}
+
+function loadReplyVideoStateFromDisk(filePath: string): WhatsAppReplyVideoState {
+  const raw = readJsonFileSafe<Partial<WhatsAppReplyVideoState>>(filePath, {});
+  if (
+    raw.mode === 'custom' &&
+    typeof raw.mimeType === 'string' &&
+    typeof raw.base64Data === 'string' &&
+    raw.base64Data
+  ) {
+    const buf = Buffer.from(raw.base64Data, 'base64');
+    if (validateVideoBinaryMagic(raw.mimeType, buf)) {
+      return {
+        mode: 'custom',
+        mimeType: raw.mimeType,
+        fileName: sanitizeVideoFileName(raw.fileName),
+        byteLength: buf.length,
+        base64Data: raw.base64Data,
+        updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 1,
+      };
+    }
+  }
+  return {
+    mode: 'none',
+    mimeType: '',
+    fileName: '',
+    byteLength: 0,
+    base64Data: '',
+    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+  };
+}
+
+let waReplyVideo3: WhatsAppReplyVideoState = loadReplyVideoStateFromDisk(WA_REPLY_VIDEO_3_FILE);
+
+function persistWaReplyVideo3Local(): void {
+  writeJsonFileSafe(WA_REPLY_VIDEO_3_FILE, waReplyVideo3);
+}
+
+function getReplyVideoStatusPayload(vidState: WhatsAppReplyVideoState = waReplyVideo3) {
+  const hasVideo =
+    vidState.mode === 'custom' && Boolean(vidState.mimeType && vidState.base64Data);
+  return {
+    mode: hasVideo ? ('custom' as const) : ('none' as const),
+    hasVideo,
+    mimeType: hasVideo ? vidState.mimeType : null,
+    fileName: hasVideo ? vidState.fileName : null,
+    byteLength: hasVideo ? vidState.byteLength : 0,
+    updatedAt: vidState.updatedAt,
+  };
+}
+
+// 4a-universal. Unified 3-Slot Universal Attachment Engine (Any File Format: PDF, Image, Video, Doc up to 25 MB)
+type WaSlotNumber = 1 | 2 | 3;
+type WaSlotMode = 'default' | 'custom' | 'none';
+type WaSlotCategory = 'image' | 'video' | 'pdf' | 'document';
+
+interface WaSlotMediaMeta {
+  mode: WaSlotMode;
+  mimeType: string;
+  fileName: string;
+  byteLength: number;
+  category: WaSlotCategory;
+  updatedAt: number;
+}
+
+interface WaSlotMediaRtdbMeta extends WaSlotMediaMeta {
+  chunkCount: number;
+}
+
+const MAX_SLOT_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB universal limit
+const SLOT_RTDB_CHUNK_CHARS = 1_000_000; // ~1 MB base64 per chunk
+
+const BLOCKED_DANGEROUS_EXTENSIONS = new Set([
+  '.exe',
+  '.dll',
+  '.bat',
+  '.cmd',
+  '.com',
+  '.scr',
+  '.msi',
+  '.pif',
+  '.sh',
+  '.bash',
+  '.ps1',
+  '.vbs',
+  '.vbe',
+  '.wsf',
+  '.hta',
+  '.jar',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.html',
+  '.htm',
+  '.xhtml',
+  '.svg',
+  '.svgz',
+]);
+
+const EXTENSION_MIME_MAP: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
+  '.bmp': 'image/bmp',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.avif': 'image/avif',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.3gp': 'video/3gpp',
+  '.mkv': 'video/x-matroska',
+  '.avi': 'video/x-msvideo',
+  '.wmv': 'video/x-ms-wmv',
+  '.flv': 'video/x-flv',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.csv': 'text/csv',
+  '.txt': 'text/plain',
+  '.rtf': 'application/rtf',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.zip': 'application/zip',
+  '.rar': 'application/vnd.rar',
+  '.7z': 'application/x-7z-compressed',
+  '.cdr': 'application/cdr',
+  '.dwg': 'application/acad',
+  '.dxf': 'application/dxf',
+  '.psd': 'image/vnd.adobe.photoshop',
+  '.ai': 'application/postscript',
+  '.eps': 'application/postscript',
+};
+
+function parseValidSlotNumber(raw: unknown): WaSlotNumber | null {
+  const num = Number(raw);
+  if (num === 1 || num === 2 || num === 3) return num;
+  return null;
+}
+
+function getSlotPaths(slot: WaSlotNumber): { metaPath: string; binPath: string } {
+  const metaPath = path.resolve(DATA_DIR, `wa-slot-${slot}-meta.json`);
+  const binPath = path.resolve(DATA_DIR, `wa-slot-${slot}.bin`);
+  const safePrefix = DATA_DIR.endsWith(path.sep) ? DATA_DIR : DATA_DIR + path.sep;
+  if (!metaPath.startsWith(safePrefix) || !binPath.startsWith(safePrefix)) {
+    throw new Error('Invalid slot storage path.');
+  }
+  return { metaPath, binPath };
+}
+
+function sanitizeAttachmentFileName(rawName: unknown, fallbackExt = ''): string {
+  let decoded = '';
+  if (typeof rawName === 'string' && rawName.trim()) {
+    try {
+      decoded = decodeURIComponent(rawName.trim());
+    } catch {
+      decoded = rawName.trim();
+    }
+  }
+  const baseOnly = path.basename(decoded).replace(/[\u0000-\u001f/\\:*?"<>|]/g, '_').trim();
+  const collapsed = baseOnly.replace(/^\.+/, '').slice(0, 120).trim();
+  if (collapsed) return collapsed;
+  return `prestair-attachment${fallbackExt || '.bin'}`;
+}
+
+function classifySlotCategory(mimeType: string, buf: Buffer): WaSlotCategory {
+  if (mimeType === 'application/pdf') return 'pdf';
+  if (
+    (mimeType === 'image/jpeg' && buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) ||
+    (mimeType === 'image/png' &&
+      buf.length >= 4 &&
+      buf[0] === 0x89 &&
+      buf[1] === 0x50 &&
+      buf[2] === 0x4e &&
+      buf[3] === 0x47) ||
+    (mimeType === 'image/webp' &&
+      buf.length >= 12 &&
+      buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      buf.subarray(8, 12).toString('ascii') === 'WEBP') ||
+    (mimeType === 'image/gif' && buf.length >= 6 && buf.subarray(0, 4).toString('ascii') === 'GIF8')
+  ) {
+    return 'image';
+  }
+  if (
+    mimeType === 'video/mp4' ||
+    mimeType === 'video/quicktime' ||
+    mimeType === 'video/webm' ||
+    mimeType === 'video/3gpp'
+  ) {
+    return 'video';
+  }
+  return 'document';
+}
+
+function detectAndValidateAttachment(
+  buf: Buffer,
+  rawHeaderMime: unknown,
+  rawFileName: unknown
+):
+  | {
+      valid: true;
+      mimeType: string;
+      fileName: string;
+      category: WaSlotCategory;
+      byteLength: number;
+    }
+  | { valid: false; error: string } {
+  if (!Buffer.isBuffer(buf) || buf.length === 0) {
+    return { valid: false, error: 'Selected file is empty. Please choose a valid file.' };
+  }
+  if (buf.length > MAX_SLOT_ATTACHMENT_BYTES) {
+    return {
+      valid: false,
+      error: 'File size exceeds 25 MB. Please upload a file under 25 MB for WhatsApp delivery.',
+    };
+  }
+
+  const cleanFileName = sanitizeAttachmentFileName(rawFileName);
+  const ext = path.extname(cleanFileName).toLowerCase();
+  if (ext && BLOCKED_DANGEROUS_EXTENSIONS.has(ext)) {
+    return {
+      valid: false,
+      error: `Executable or script files (${ext}) are blocked for security. Please upload PDF, Image, Video, Office, or ZIP files.`,
+    };
+  }
+
+  // Block Windows PE executables ('MZ') and active HTML/Script/SVG payloads regardless of extension
+  if (buf.length >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) {
+    return { valid: false, error: 'Executable binary files are not allowed.' };
+  }
+  const headAscii = buf.subarray(0, Math.min(buf.length, 256)).toString('utf8').trimStart().toLowerCase();
+  if (
+    headAscii.startsWith('<!doctype html') ||
+    headAscii.startsWith('<html') ||
+    headAscii.startsWith('<script') ||
+    headAscii.startsWith('<svg')
+  ) {
+    return {
+      valid: false,
+      error: 'HTML, SVG, and script files are blocked for security. Please upload a PDF, PNG/JPG image, video, or document.',
+    };
+  }
+
+  // Detect accurate MIME type from binary magic bytes first, then extension, then client header
+  let detectedMime = '';
+  if (buf.length >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-') {
+    detectedMime = 'application/pdf';
+  } else if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    detectedMime = 'image/jpeg';
+  } else if (
+    buf.length >= 4 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47
+  ) {
+    detectedMime = 'image/png';
+  } else if (
+    buf.length >= 12 &&
+    buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buf.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    detectedMime = 'image/webp';
+  } else if (buf.length >= 6 && buf.subarray(0, 4).toString('ascii') === 'GIF8') {
+    detectedMime = 'image/gif';
+  } else if (buf.length >= 12 && buf.subarray(4, 8).toString('ascii') === 'ftyp') {
+    const brand = buf.subarray(8, 12).toString('ascii').toLowerCase();
+    if (brand.startsWith('hei') || brand.startsWith('mif1') || brand.startsWith('msf1')) {
+      detectedMime = 'image/heic';
+    } else if (brand.startsWith('avif')) {
+      detectedMime = 'image/avif';
+    } else if (brand === 'qt  ') {
+      detectedMime = 'video/quicktime';
+    } else if (brand.startsWith('3gp')) {
+      detectedMime = 'video/3gpp';
+    } else if (brand.startsWith('m4a')) {
+      detectedMime = 'audio/mp4';
+    } else {
+      detectedMime = 'video/mp4';
+    }
+  } else if (
+    buf.length >= 4 &&
+    buf[0] === 0x1a &&
+    buf[1] === 0x45 &&
+    buf[2] === 0xdf &&
+    buf[3] === 0xa3
+  ) {
+    detectedMime = ext === '.mkv' ? 'video/x-matroska' : 'video/webm';
+  }
+
+  if (!detectedMime && ext && EXTENSION_MIME_MAP[ext]) {
+    detectedMime = EXTENSION_MIME_MAP[ext];
+  }
+
+  if (!detectedMime && typeof rawHeaderMime === 'string') {
+    const candidate = rawHeaderMime.split(';')[0].trim().toLowerCase();
+    if (
+      /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(candidate) &&
+      candidate !== 'text/html' &&
+      candidate !== 'application/xhtml+xml' &&
+      candidate !== 'image/svg+xml' &&
+      candidate !== 'text/javascript' &&
+      candidate !== 'application/javascript'
+    ) {
+      detectedMime = candidate;
+    }
+  }
+
+  if (!detectedMime) {
+    detectedMime = 'application/octet-stream';
+  }
+
+  // Ensure filename has a sensible extension for WhatsApp document bubble display
+  let finalFileName = cleanFileName;
+  if (!ext) {
+    const fallbackExt =
+      detectedMime === 'application/pdf'
+        ? '.pdf'
+        : detectedMime === 'image/jpeg'
+          ? '.jpg'
+          : detectedMime === 'image/png'
+            ? '.png'
+            : detectedMime === 'image/webp'
+              ? '.webp'
+              : detectedMime === 'video/mp4'
+                ? '.mp4'
+                : detectedMime === 'video/quicktime'
+                  ? '.mov'
+                  : detectedMime === 'video/webm'
+                    ? '.webm'
+                    : '';
+    finalFileName = sanitizeAttachmentFileName(`${cleanFileName}${fallbackExt}`, fallbackExt);
+  }
+
+  const category = classifySlotCategory(detectedMime, buf);
+  return {
+    valid: true,
+    mimeType: detectedMime,
+    fileName: finalFileName,
+    category,
+    byteLength: buf.length,
+  };
+}
+
+function writeBinaryFileSafe(filePath: string, buf: Buffer): void {
+  try {
+    const tmpPath = `${filePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmpPath, buf);
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    console.warn(`[storage] Failed writing ${path.basename(filePath)}:`, (err as Error)?.message);
+  }
+}
+
+function readSlotBinarySafe(slot: WaSlotNumber): Buffer | null {
+  try {
+    const { binPath } = getSlotPaths(slot);
+    if (!fs.existsSync(binPath)) return null;
+    const buf = fs.readFileSync(binPath);
+    return buf.length > 0 && buf.length <= MAX_SLOT_ATTACHMENT_BYTES ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
+function removeSlotBinarySafe(slot: WaSlotNumber): void {
+  try {
+    const { binPath } = getSlotPaths(slot);
+    if (fs.existsSync(binPath)) {
+      fs.unlinkSync(binPath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function persistWaSlotMetaLocal(slot: WaSlotNumber, meta: WaSlotMediaMeta): void {
+  const { metaPath } = getSlotPaths(slot);
+  writeJsonFileSafe(metaPath, meta);
+}
+
+function loadInitialWaSlotMedia(slot: WaSlotNumber): WaSlotMediaMeta {
+  const { metaPath } = getSlotPaths(slot);
+  const raw = readJsonFileSafe<Partial<WaSlotMediaMeta>>(metaPath, {});
+  const defaultModeForSlot: WaSlotMode = slot === 3 ? 'none' : 'default';
+
+  if (typeof raw.updatedAt === 'number' && raw.updatedAt > 0) {
+    const mode: WaSlotMode =
+      raw.mode === 'custom'
+        ? 'custom'
+        : raw.mode === 'none'
+          ? 'none'
+          : slot === 3
+            ? 'none'
+            : 'default';
+    if (mode === 'custom') {
+      const buf = readSlotBinarySafe(slot);
+      if (buf && typeof raw.mimeType === 'string' && raw.mimeType) {
+        const check = detectAndValidateAttachment(buf, raw.mimeType, raw.fileName);
+        if (check.valid) {
+          return {
+            mode: 'custom',
+            mimeType: check.mimeType,
+            fileName: check.fileName,
+            byteLength: check.byteLength,
+            category: check.category,
+            updatedAt: raw.updatedAt,
+          };
+        }
+      }
+    }
+    return {
+      mode: mode === 'custom' ? defaultModeForSlot : mode,
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      category: 'document',
+      updatedAt: raw.updatedAt,
+    };
+  }
+
+  // Seamless migration from existing legacy Image #1 / Image #2 / Video #3 files so zero user uploads are lost
+  if (slot === 1 && waReplyImage.updatedAt > 0) {
+    if (waReplyImage.mode === 'custom' && waReplyImage.base64Data) {
+      const buf = Buffer.from(waReplyImage.base64Data, 'base64');
+      const ext = waReplyImage.mimeType === 'image/png' ? '.png' : waReplyImage.mimeType === 'image/webp' ? '.webp' : '.jpg';
+      const check = detectAndValidateAttachment(buf, waReplyImage.mimeType, `prestair-message-1${ext}`);
+      if (check.valid) {
+        writeBinaryFileSafe(getSlotPaths(1).binPath, buf);
+        const migrated: WaSlotMediaMeta = {
+          mode: 'custom',
+          mimeType: check.mimeType,
+          fileName: check.fileName,
+          byteLength: check.byteLength,
+          category: check.category,
+          updatedAt: waReplyImage.updatedAt,
+        };
+        persistWaSlotMetaLocal(1, migrated);
+        return migrated;
+      }
+    }
+    const migratedMode: WaSlotMediaMeta = {
+      mode: waReplyImage.mode === 'none' ? 'none' : 'default',
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      category: 'image',
+      updatedAt: waReplyImage.updatedAt,
+    };
+    persistWaSlotMetaLocal(1, migratedMode);
+    return migratedMode;
+  }
+
+  if (slot === 2 && waReplyImage2.updatedAt > 0) {
+    if (waReplyImage2.mode === 'custom' && waReplyImage2.base64Data) {
+      const buf = Buffer.from(waReplyImage2.base64Data, 'base64');
+      const ext = waReplyImage2.mimeType === 'image/png' ? '.png' : waReplyImage2.mimeType === 'image/webp' ? '.webp' : '.jpg';
+      const check = detectAndValidateAttachment(buf, waReplyImage2.mimeType, `prestair-message-2${ext}`);
+      if (check.valid) {
+        writeBinaryFileSafe(getSlotPaths(2).binPath, buf);
+        const migrated: WaSlotMediaMeta = {
+          mode: 'custom',
+          mimeType: check.mimeType,
+          fileName: check.fileName,
+          byteLength: check.byteLength,
+          category: check.category,
+          updatedAt: waReplyImage2.updatedAt,
+        };
+        persistWaSlotMetaLocal(2, migrated);
+        return migrated;
+      }
+    }
+    const migratedMode: WaSlotMediaMeta = {
+      mode: waReplyImage2.mode === 'none' ? 'none' : 'default',
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      category: 'image',
+      updatedAt: waReplyImage2.updatedAt,
+    };
+    persistWaSlotMetaLocal(2, migratedMode);
+    return migratedMode;
+  }
+
+  if (slot === 3 && waReplyVideo3.updatedAt > 0) {
+    if (waReplyVideo3.mode === 'custom' && waReplyVideo3.base64Data) {
+      const buf = Buffer.from(waReplyVideo3.base64Data, 'base64');
+      const check = detectAndValidateAttachment(
+        buf,
+        waReplyVideo3.mimeType,
+        waReplyVideo3.fileName || 'prestair-showcase.mp4'
+      );
+      if (check.valid) {
+        writeBinaryFileSafe(getSlotPaths(3).binPath, buf);
+        const migrated: WaSlotMediaMeta = {
+          mode: 'custom',
+          mimeType: check.mimeType,
+          fileName: check.fileName,
+          byteLength: check.byteLength,
+          category: check.category,
+          updatedAt: waReplyVideo3.updatedAt,
+        };
+        persistWaSlotMetaLocal(3, migrated);
+        return migrated;
+      }
+    }
+    const migratedNone: WaSlotMediaMeta = {
+      mode: 'none',
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      category: 'video',
+      updatedAt: waReplyVideo3.updatedAt,
+    };
+    persistWaSlotMetaLocal(3, migratedNone);
+    return migratedNone;
+  }
+
+  return {
+    mode: defaultModeForSlot,
+    mimeType: '',
+    fileName: '',
+    byteLength: 0,
+    category: slot === 3 ? 'document' : 'image',
+    updatedAt: 0,
+  };
+}
+
+const waSlotMedia: Record<WaSlotNumber, WaSlotMediaMeta> = {
+  1: loadInitialWaSlotMedia(1),
+  2: loadInitialWaSlotMedia(2),
+  3: loadInitialWaSlotMedia(3),
+};
+
+function getSlotStatusPayload(slot: WaSlotNumber) {
+  const meta = waSlotMedia[slot];
+  const hasCustomFile = meta.mode === 'custom' && meta.byteLength > 0 && Boolean(meta.mimeType);
+  const effectiveMode: WaSlotMode =
+    meta.mode === 'custom' && !hasCustomFile
+      ? slot === 3
+        ? 'none'
+        : 'default'
+      : meta.mode;
+  return {
+    slot,
+    mode: effectiveMode,
+    hasDefault: slot === 1 || slot === 2,
+    hasCustomFile,
+    mimeType: hasCustomFile ? meta.mimeType : null,
+    fileName: hasCustomFile ? meta.fileName : null,
+    byteLength: hasCustomFile ? meta.byteLength : 0,
+    category: hasCustomFile ? meta.category : slot === 3 ? ('document' as const) : ('image' as const),
+    updatedAt: meta.updatedAt,
+  };
+}
+
+function getAllSlotsStatusPayload() {
+  return {
+    1: getSlotStatusPayload(1),
+    2: getSlotStatusPayload(2),
+    3: getSlotStatusPayload(3),
   };
 }
 
@@ -1002,6 +1685,275 @@ async function pushWaReplyImage2ToRtdb(): Promise<void> {
   }
 }
 
+async function pushWaReplyVideo3ToRtdb(): Promise<void> {
+  if (!rtdbInstance) return;
+  try {
+    if (waReplyVideo3.mode === 'custom' && waReplyVideo3.base64Data && waReplyVideo3.mimeType) {
+      const totalChars = waReplyVideo3.base64Data.length;
+      const chunkCount = Math.ceil(totalChars / VIDEO_RTDB_CHUNK_CHARS);
+      await remove(ref(rtdbInstance, 'meta/waReplyVideo3Chunks')).catch(() => {});
+      for (let i = 0; i < chunkCount; i++) {
+        const slice = waReplyVideo3.base64Data.slice(
+          i * VIDEO_RTDB_CHUNK_CHARS,
+          (i + 1) * VIDEO_RTDB_CHUNK_CHARS
+        );
+        await set(ref(rtdbInstance, `meta/waReplyVideo3Chunks/${i}`), slice);
+      }
+      const metaPayload: WhatsAppReplyVideoRtdbMeta = {
+        mode: 'custom',
+        mimeType: waReplyVideo3.mimeType,
+        fileName: waReplyVideo3.fileName,
+        byteLength: waReplyVideo3.byteLength,
+        chunkCount,
+        updatedAt: waReplyVideo3.updatedAt,
+      };
+      await set(ref(rtdbInstance, 'meta/waReplyVideo3Meta'), metaPayload);
+    } else {
+      await remove(ref(rtdbInstance, 'meta/waReplyVideo3Chunks')).catch(() => {});
+      const metaPayload: WhatsAppReplyVideoRtdbMeta = {
+        mode: 'none',
+        mimeType: '',
+        fileName: '',
+        byteLength: 0,
+        chunkCount: 0,
+        updatedAt: waReplyVideo3.updatedAt,
+      };
+      await set(ref(rtdbInstance, 'meta/waReplyVideo3Meta'), metaPayload);
+    }
+  } catch {
+    // ignore transient RTDB write failure
+  }
+}
+
+let isHydratingVideo3FromRtdb = false;
+
+async function syncWaReplyVideo3FromRtdbMeta(
+  metaVal: Partial<WhatsAppReplyVideoRtdbMeta> | null
+): Promise<void> {
+  if (!rtdbInstance || !metaVal || typeof metaVal !== 'object') return;
+  const remoteUpdatedAt = typeof metaVal.updatedAt === 'number' ? metaVal.updatedAt : 1;
+  if (remoteUpdatedAt <= waReplyVideo3.updatedAt) {
+    if (waReplyVideo3.updatedAt > remoteUpdatedAt) {
+      void pushWaReplyVideo3ToRtdb();
+    }
+    return;
+  }
+
+  if (metaVal.mode !== 'custom' || !metaVal.chunkCount || metaVal.chunkCount <= 0) {
+    waReplyVideo3 = {
+      mode: 'none',
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      base64Data: '',
+      updatedAt: remoteUpdatedAt,
+    };
+    persistWaReplyVideo3Local();
+    return;
+  }
+
+  if (isHydratingVideo3FromRtdb) return;
+  isHydratingVideo3FromRtdb = true;
+  try {
+    const chunkCount = Math.min(32, Math.max(1, Math.floor(metaVal.chunkCount)));
+    const chunksSnap = await get(ref(rtdbInstance, 'meta/waReplyVideo3Chunks'));
+    const rawChunks = chunksSnap.val() as Record<string, unknown> | unknown[] | null;
+    if (!rawChunks || typeof rawChunks !== 'object') return;
+    const parts: string[] = [];
+    for (let i = 0; i < chunkCount; i++) {
+      const part = Array.isArray(rawChunks)
+        ? rawChunks[i]
+        : (rawChunks as Record<string, unknown>)[String(i)];
+      if (typeof part !== 'string' || !part) {
+        return;
+      }
+      parts.push(part);
+    }
+    const joinedBase64 = parts.join('');
+    const mimeType = typeof metaVal.mimeType === 'string' ? metaVal.mimeType : '';
+    const buf = Buffer.from(joinedBase64, 'base64');
+    if (validateVideoBinaryMagic(mimeType, buf)) {
+      waReplyVideo3 = {
+        mode: 'custom',
+        mimeType,
+        fileName: sanitizeVideoFileName(metaVal.fileName),
+        byteLength: buf.length,
+        base64Data: joinedBase64,
+        updatedAt: remoteUpdatedAt,
+      };
+      persistWaReplyVideo3Local();
+      // Mirror legacy RTDB video into unified Slot 3 if Slot 3 is older
+      if (remoteUpdatedAt > waSlotMedia[3].updatedAt) {
+        writeBinaryFileSafe(getSlotPaths(3).binPath, buf);
+        waSlotMedia[3] = {
+          mode: 'custom',
+          mimeType,
+          fileName: sanitizeAttachmentFileName(metaVal.fileName, '.mp4'),
+          byteLength: buf.length,
+          category: 'video',
+          updatedAt: remoteUpdatedAt,
+        };
+        persistWaSlotMetaLocal(3, waSlotMedia[3]);
+      }
+    }
+  } catch {
+    // ignore transient chunk fetch error
+  } finally {
+    isHydratingVideo3FromRtdb = false;
+  }
+}
+
+const hydratingSlotLocks: Record<WaSlotNumber, boolean> = {
+  1: false,
+  2: false,
+  3: false,
+};
+
+async function pushWaSlotMediaToRtdb(slot: WaSlotNumber): Promise<void> {
+  if (!rtdbInstance) return;
+  const meta = waSlotMedia[slot];
+  try {
+    if (meta.mode === 'custom') {
+      const buf = readSlotBinarySafe(slot);
+      if (buf && buf.length > 0 && meta.mimeType) {
+        const base64Str = buf.toString('base64');
+        const chunkCount = Math.ceil(base64Str.length / SLOT_RTDB_CHUNK_CHARS);
+        await remove(ref(rtdbInstance, `meta/waSlotMediaChunks/${slot}`)).catch(() => {});
+        const BATCH_SIZE = 6;
+        for (let start = 0; start < chunkCount; start += BATCH_SIZE) {
+          const writes: Promise<void>[] = [];
+          for (let i = start; i < Math.min(chunkCount, start + BATCH_SIZE); i++) {
+            const slice = base64Str.slice(
+              i * SLOT_RTDB_CHUNK_CHARS,
+              (i + 1) * SLOT_RTDB_CHUNK_CHARS
+            );
+            writes.push(set(ref(rtdbInstance, `meta/waSlotMediaChunks/${slot}/${i}`), slice));
+          }
+          await Promise.all(writes);
+        }
+        const rtdbMeta: WaSlotMediaRtdbMeta = {
+          ...meta,
+          byteLength: buf.length,
+          chunkCount,
+        };
+        await set(ref(rtdbInstance, `meta/waSlotMediaMeta/${slot}`), rtdbMeta);
+        return;
+      }
+    }
+
+    await remove(ref(rtdbInstance, `meta/waSlotMediaChunks/${slot}`)).catch(() => {});
+    const rtdbMeta: WaSlotMediaRtdbMeta = {
+      mode: meta.mode === 'custom' ? (slot === 3 ? 'none' : 'default') : meta.mode,
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      category: meta.category,
+      chunkCount: 0,
+      updatedAt: meta.updatedAt,
+    };
+    await set(ref(rtdbInstance, `meta/waSlotMediaMeta/${slot}`), rtdbMeta);
+  } catch {
+    // ignore transient RTDB write failure
+  }
+}
+
+async function syncWaSlotMediaFromRtdbMeta(
+  slot: WaSlotNumber,
+  metaVal: Partial<WaSlotMediaRtdbMeta> | null
+): Promise<void> {
+  if (!rtdbInstance || !metaVal || typeof metaVal !== 'object') return;
+  const remoteUpdatedAt = typeof metaVal.updatedAt === 'number' ? metaVal.updatedAt : 1;
+  if (remoteUpdatedAt <= waSlotMedia[slot].updatedAt) {
+    if (waSlotMedia[slot].updatedAt > remoteUpdatedAt) {
+      void pushWaSlotMediaToRtdb(slot);
+    }
+    return;
+  }
+
+  const remoteMode: WaSlotMode =
+    metaVal.mode === 'custom'
+      ? 'custom'
+      : metaVal.mode === 'none'
+        ? 'none'
+        : slot === 3
+          ? 'none'
+          : 'default';
+
+  if (remoteMode !== 'custom' || !metaVal.chunkCount || metaVal.chunkCount <= 0) {
+    removeSlotBinarySafe(slot);
+    waSlotMedia[slot] = {
+      mode: remoteMode === 'custom' ? (slot === 3 ? 'none' : 'default') : remoteMode,
+      mimeType: '',
+      fileName: '',
+      byteLength: 0,
+      category: slot === 3 ? 'document' : 'image',
+      updatedAt: remoteUpdatedAt,
+    };
+    persistWaSlotMetaLocal(slot, waSlotMedia[slot]);
+    return;
+  }
+
+  if (hydratingSlotLocks[slot]) return;
+  hydratingSlotLocks[slot] = true;
+  try {
+    const chunkCount = Math.min(48, Math.max(1, Math.floor(metaVal.chunkCount)));
+    const chunksSnap = await get(ref(rtdbInstance, `meta/waSlotMediaChunks/${slot}`));
+    const rawChunks = chunksSnap.val() as Record<string, unknown> | unknown[] | null;
+    if (!rawChunks || typeof rawChunks !== 'object') return;
+    const parts: string[] = [];
+    for (let i = 0; i < chunkCount; i++) {
+      const part = Array.isArray(rawChunks)
+        ? rawChunks[i]
+        : (rawChunks as Record<string, unknown>)[String(i)];
+      if (typeof part !== 'string' || !part) {
+        return;
+      }
+      parts.push(part);
+    }
+    const buf = Buffer.from(parts.join(''), 'base64');
+    const validated = detectAndValidateAttachment(buf, metaVal.mimeType, metaVal.fileName);
+    if (validated.valid) {
+      writeBinaryFileSafe(getSlotPaths(slot).binPath, buf);
+      waSlotMedia[slot] = {
+        mode: 'custom',
+        mimeType: validated.mimeType,
+        fileName: validated.fileName,
+        byteLength: validated.byteLength,
+        category: validated.category,
+        updatedAt: remoteUpdatedAt,
+      };
+      persistWaSlotMetaLocal(slot, waSlotMedia[slot]);
+
+      // Mirror standard <= 2MB images into legacy waReplyImage / waReplyImage2 for Showcase tab compatibility
+      if (
+        (slot === 1 || slot === 2) &&
+        (validated.mimeType === 'image/jpeg' ||
+          validated.mimeType === 'image/png' ||
+          validated.mimeType === 'image/webp') &&
+        buf.length <= MAX_REPLY_IMAGE_BYTES
+      ) {
+        const legacyImgState: WhatsAppReplyImageState = {
+          mode: 'custom',
+          mimeType: validated.mimeType,
+          base64Data: buf.toString('base64'),
+          updatedAt: remoteUpdatedAt,
+        };
+        if (slot === 1) {
+          waReplyImage = legacyImgState;
+          persistWaReplyImageLocal();
+        } else {
+          waReplyImage2 = legacyImgState;
+          persistWaReplyImage2Local();
+        }
+      }
+    }
+  } catch {
+    // ignore transient chunk read error
+  } finally {
+    hydratingSlotLocks[slot] = false;
+  }
+}
+
 async function pushShowcaseSettingsToRtdb(): Promise<void> {
   if (!rtdbInstance) return;
   try {
@@ -1047,9 +1999,12 @@ async function publishLocalWaRuntimeStatusToRtdb(): Promise<void> {
 interface WaDispatchJob {
   jobId: string;
   phone: string;
+  sendFirst?: boolean;
   text: string;
   sendSecond?: boolean;
   secondText?: string | null;
+  sendThird?: boolean;
+  thirdText?: string | null;
   leadId?: string | null;
   requestedBy: string;
   requestedAt: number;
@@ -1060,9 +2015,12 @@ const processedRelayJobs = new Set<string>();
 
 async function enqueueCloudWaDispatchJob(params: {
   phone: string;
+  sendFirst?: boolean;
   text: string;
   sendSecond?: boolean;
   secondText?: string | null;
+  sendThird?: boolean;
+  thirdText?: string | null;
   leadId?: string | null;
 }): Promise<boolean> {
   if (!rtdbInstance || !isRemoteCloudWorkerActive()) return false;
@@ -1070,6 +2028,10 @@ async function enqueueCloudWaDispatchJob(params: {
   const job: WaDispatchJob = {
     jobId,
     phone: sanitizeField(params.phone, 32),
+    sendFirst:
+      typeof params.sendFirst === 'boolean'
+        ? params.sendFirst
+        : waSettings.firstMessageEnabled,
     text: String(params.text || '').slice(0, 4000),
     sendSecond:
       typeof params.sendSecond === 'boolean'
@@ -1079,6 +2041,14 @@ async function enqueueCloudWaDispatchJob(params: {
       typeof params.secondText === 'string' && params.secondText.trim()
         ? params.secondText.slice(0, 4000)
         : waSettings.secondMessageTemplate.slice(0, 4000),
+    sendThird:
+      typeof params.sendThird === 'boolean'
+        ? params.sendThird
+        : waSettings.thirdMessageEnabled,
+    thirdText:
+      typeof params.thirdText === 'string' && params.thirdText.trim()
+        ? params.thirdText.slice(0, 4000)
+        : waSettings.thirdMessageTemplate.slice(0, 4000),
     leadId: params.leadId ? sanitizeField(params.leadId, 128) : null,
     requestedBy: SERVER_INSTANCE_ID,
     requestedAt: Date.now(),
@@ -1315,6 +2285,10 @@ function initServerRealtimeDbSync(): void {
               typeof val.autoReplyEnabled === 'boolean'
                 ? val.autoReplyEnabled
                 : waSettings.autoReplyEnabled,
+            firstMessageEnabled:
+              typeof val.firstMessageEnabled === 'boolean'
+                ? val.firstMessageEnabled
+                : waSettings.firstMessageEnabled,
             messageTemplate:
               typeof val.messageTemplate === 'string' && val.messageTemplate.trim()
                 ? val.messageTemplate.slice(0, 4000)
@@ -1327,6 +2301,14 @@ function initServerRealtimeDbSync(): void {
               typeof val.secondMessageTemplate === 'string' && val.secondMessageTemplate.trim()
                 ? val.secondMessageTemplate.slice(0, 4000)
                 : DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+            thirdMessageEnabled:
+              typeof val.thirdMessageEnabled === 'boolean'
+                ? val.thirdMessageEnabled
+                : waSettings.thirdMessageEnabled,
+            thirdMessageTemplate:
+              typeof val.thirdMessageTemplate === 'string' && val.thirdMessageTemplate.trim()
+                ? val.thirdMessageTemplate.slice(0, 4000)
+                : DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY,
             adminNotifyPhone:
               typeof val.adminNotifyPhone === 'string'
                 ? sanitizeField(val.adminNotifyPhone, 32)
@@ -1364,6 +2346,19 @@ function initServerRealtimeDbSync(): void {
                 updatedAt: remoteUpdatedAt,
               };
               persistWaReplyImageLocal();
+              if (remoteUpdatedAt > waSlotMedia[1].updatedAt) {
+                const ext = val.mimeType === 'image/png' ? '.png' : val.mimeType === 'image/webp' ? '.webp' : '.jpg';
+                writeBinaryFileSafe(getSlotPaths(1).binPath, buf);
+                waSlotMedia[1] = {
+                  mode: 'custom',
+                  mimeType: val.mimeType,
+                  fileName: `prestair-message-1${ext}`,
+                  byteLength: buf.length,
+                  category: 'image',
+                  updatedAt: remoteUpdatedAt,
+                };
+                persistWaSlotMetaLocal(1, waSlotMedia[1]);
+              }
             }
           } else {
             waReplyImage = {
@@ -1404,6 +2399,19 @@ function initServerRealtimeDbSync(): void {
                 updatedAt: remoteUpdatedAt,
               };
               persistWaReplyImage2Local();
+              if (remoteUpdatedAt > waSlotMedia[2].updatedAt) {
+                const ext = val.mimeType === 'image/png' ? '.png' : val.mimeType === 'image/webp' ? '.webp' : '.jpg';
+                writeBinaryFileSafe(getSlotPaths(2).binPath, buf);
+                waSlotMedia[2] = {
+                  mode: 'custom',
+                  mimeType: val.mimeType,
+                  fileName: `prestair-message-2${ext}`,
+                  byteLength: buf.length,
+                  category: 'image',
+                  updatedAt: remoteUpdatedAt,
+                };
+                persistWaSlotMetaLocal(2, waSlotMedia[2]);
+              }
             }
           } else {
             waReplyImage2 = {
@@ -1421,6 +2429,28 @@ function initServerRealtimeDbSync(): void {
         void pushWaReplyImage2ToRtdb();
       }
     });
+
+    // 5c-video. Sync WhatsApp Attached Reply Video #3 across all deployments
+    onValue(ref(rtdbInstance, 'meta/waReplyVideo3Meta'), (snap) => {
+      const val = snap.val() as Partial<WhatsAppReplyVideoRtdbMeta> | null;
+      if (val && typeof val === 'object') {
+        void syncWaReplyVideo3FromRtdbMeta(val);
+      } else if (waReplyVideo3.updatedAt > 0) {
+        void pushWaReplyVideo3ToRtdb();
+      }
+    });
+
+    // 5c-universal. Sync Unified 3-Slot Universal Attachments (PDF / Image / Video / Any File) across all deployments
+    for (const slot of [1, 2, 3] as WaSlotNumber[]) {
+      onValue(ref(rtdbInstance, `meta/waSlotMediaMeta/${slot}`), (snap) => {
+        const val = snap.val() as Partial<WaSlotMediaRtdbMeta> | null;
+        if (val && typeof val === 'object') {
+          void syncWaSlotMediaFromRtdbMeta(slot, val);
+        } else if (waSlotMedia[slot].updatedAt > 0) {
+          void pushWaSlotMediaToRtdb(slot);
+        }
+      });
+    }
 
     // 5d. Sync Customer Thank-You Showcase Image Settings across all deployments
     onValue(ref(rtdbInstance, 'meta/showcaseSettings'), (snap) => {
@@ -1561,6 +2591,10 @@ function processWaDispatchQueueSnapshot(
     processedRelayJobs.add(key);
 
     const phone = typeof rawJob.phone === 'string' ? rawJob.phone : '';
+    const sendFirst =
+      typeof rawJob.sendFirst === 'boolean'
+        ? rawJob.sendFirst
+        : waSettings.firstMessageEnabled;
     const text = typeof rawJob.text === 'string' ? rawJob.text : '';
     const sendSecond =
       typeof rawJob.sendSecond === 'boolean'
@@ -1570,6 +2604,14 @@ function processWaDispatchQueueSnapshot(
       typeof rawJob.secondText === 'string' && rawJob.secondText.trim()
         ? rawJob.secondText
         : waSettings.secondMessageTemplate;
+    const sendThird =
+      typeof rawJob.sendThird === 'boolean'
+        ? rawJob.sendThird
+        : waSettings.thirdMessageEnabled;
+    const thirdText =
+      typeof rawJob.thirdText === 'string' && rawJob.thirdText.trim()
+        ? rawJob.thirdText
+        : waSettings.thirdMessageTemplate;
     const leadId = typeof rawJob.leadId === 'string' ? rawJob.leadId : '';
 
     void (async () => {
@@ -1578,8 +2620,11 @@ function processWaDispatchQueueSnapshot(
           await set(ref(rtdbInstance, `meta/waDispatchQueue/${key}/status`), 'processing');
         }
         await sendPrestairWhatsAppReplyWithSingleImage(phone, text, {
+          sendFirst,
           sendSecond,
           secondCaptionText: secondText,
+          sendThird,
+          thirdCaptionText: thirdText,
         });
         if (leadId && !deletedLeadIds.has(leadId)) {
           const existingLead = leadsStore.get(leadId);
@@ -1764,6 +2809,94 @@ function resolveSecondPrestairReplyImage(): ResolvedReplyImage | null {
   return resolveFirstPrestairReplyImage();
 }
 
+interface ResolvedReplyVideo {
+  buffer: Buffer;
+  mimeType: string;
+  fileName: string;
+}
+
+function resolveThirdPrestairReplyVideo(): ResolvedReplyVideo | null {
+  if (waReplyVideo3.mode !== 'custom' || !waReplyVideo3.base64Data) {
+    return null;
+  }
+  try {
+    const customBuf = Buffer.from(waReplyVideo3.base64Data, 'base64');
+    if (validateVideoBinaryMagic(waReplyVideo3.mimeType, customBuf)) {
+      return {
+        buffer: customBuf,
+        mimeType: waReplyVideo3.mimeType,
+        fileName: waReplyVideo3.fileName || 'prestair-showcase.mp4',
+      };
+    }
+  } catch {
+    // fallback to null if decoding fails
+  }
+  return null;
+}
+
+interface ResolvedSlotAttachment {
+  buffer: Buffer;
+  mimeType: string;
+  fileName: string;
+  category: WaSlotCategory;
+}
+
+function resolveSlotAttachment(slot: WaSlotNumber): ResolvedSlotAttachment | null {
+  const meta = waSlotMedia[slot];
+  if (meta.mode === 'none') {
+    return null;
+  }
+
+  if (meta.mode === 'custom') {
+    const customBuf = readSlotBinarySafe(slot);
+    if (customBuf) {
+      const check = detectAndValidateAttachment(customBuf, meta.mimeType, meta.fileName);
+      if (check.valid) {
+        return {
+          buffer: customBuf,
+          mimeType: check.mimeType,
+          fileName: check.fileName,
+          category: check.category,
+        };
+      }
+    }
+  }
+
+  // Fallback to legacy in-memory state if waSlotMedia was not yet populated
+  if (slot === 1) {
+    const legacy1 = resolveFirstPrestairReplyImage();
+    if (!legacy1) return null;
+    const ext = legacy1.mimeType === 'image/png' ? '.png' : '.jpg';
+    return {
+      buffer: legacy1.buffer,
+      mimeType: legacy1.mimeType,
+      fileName: `prestair-showcase-1${ext}`,
+      category: 'image',
+    };
+  }
+
+  if (slot === 2) {
+    const legacy2 = resolveSecondPrestairReplyImage();
+    if (!legacy2) return null;
+    const ext = legacy2.mimeType === 'image/png' ? '.png' : '.jpg';
+    return {
+      buffer: legacy2.buffer,
+      mimeType: legacy2.mimeType,
+      fileName: `prestair-showcase-2${ext}`,
+      category: 'image',
+    };
+  }
+
+  const legacy3 = resolveThirdPrestairReplyVideo();
+  if (!legacy3) return null;
+  return {
+    buffer: legacy3.buffer,
+    mimeType: legacy3.mimeType,
+    fileName: legacy3.fileName,
+    category: 'video',
+  };
+}
+
 async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
   if (!rtdbInstance) return;
   try {
@@ -1776,6 +2909,10 @@ async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
             typeof val.autoReplyEnabled === 'boolean'
               ? val.autoReplyEnabled
               : waSettings.autoReplyEnabled,
+          firstMessageEnabled:
+            typeof val.firstMessageEnabled === 'boolean'
+              ? val.firstMessageEnabled
+              : true,
           messageTemplate:
             typeof val.messageTemplate === 'string' && val.messageTemplate.trim()
               ? val.messageTemplate.slice(0, 4000)
@@ -1788,6 +2925,14 @@ async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
             typeof val.secondMessageTemplate === 'string' && val.secondMessageTemplate.trim()
               ? val.secondMessageTemplate.slice(0, 4000)
               : DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+          thirdMessageEnabled:
+            typeof val.thirdMessageEnabled === 'boolean'
+              ? val.thirdMessageEnabled
+              : true,
+          thirdMessageTemplate:
+            typeof val.thirdMessageTemplate === 'string' && val.thirdMessageTemplate.trim()
+              ? val.thirdMessageTemplate.slice(0, 4000)
+              : DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY,
           adminNotifyPhone:
             typeof val.adminNotifyPhone === 'string'
               ? sanitizeField(val.adminNotifyPhone, 32)
@@ -1838,6 +2983,24 @@ async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
             updatedAt: typeof val2.updatedAt === 'number' ? val2.updatedAt : 1,
           };
           persistWaReplyImage2Local();
+        }
+      }
+    }
+
+    if (waReplyVideo3.updatedAt === 0) {
+      const snapVid = await get(ref(rtdbInstance, 'meta/waReplyVideo3Meta'));
+      const valVid = snapVid.val() as Partial<WhatsAppReplyVideoRtdbMeta> | null;
+      if (valVid && typeof valVid === 'object') {
+        await syncWaReplyVideo3FromRtdbMeta(valVid);
+      }
+    }
+
+    for (const slot of [1, 2, 3] as WaSlotNumber[]) {
+      if (waSlotMedia[slot].updatedAt === 0) {
+        const snapSlot = await get(ref(rtdbInstance, `meta/waSlotMediaMeta/${slot}`));
+        const valSlot = snapSlot.val() as Partial<WaSlotMediaRtdbMeta> | null;
+        if (valSlot && typeof valSlot === 'object') {
+          await syncWaSlotMediaFromRtdbMeta(slot, valSlot);
         }
       }
     }
@@ -2156,35 +3319,62 @@ async function resolveWhatsAppJid(rawPhone: string): Promise<string> {
   return `${digits}@s.whatsapp.net`;
 }
 
-async function sendSingleWhatsAppMediaOrText(
+async function sendSingleWhatsAppAttachmentOrText(
   jid: string,
   caption: string,
-  imagePayload: ResolvedReplyImage | null
+  attachment: ResolvedSlotAttachment | null
 ): Promise<void> {
   const sock = await waitForActiveWaSocket(8000);
-  if (!imagePayload) {
+  if (!attachment) {
     await sock.sendMessage(jid, { text: caption });
     return;
   }
 
-  try {
-    await sock.sendMessage(jid, {
-      image: imagePayload.buffer,
-      mimetype: imagePayload.mimeType,
-      caption,
-    });
-  } catch {
-    // Retry media upload once after brief pause, then fallback to text so delivery never drops
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const retrySock = await waitForActiveWaSocket(8000);
-    try {
-      await retrySock.sendMessage(jid, {
-        image: imagePayload.buffer,
-        mimetype: imagePayload.mimeType,
+  const sendPrimaryPayload = async (activeSock: WASocket) => {
+    if (attachment.category === 'image') {
+      await activeSock.sendMessage(jid, {
+        image: attachment.buffer,
+        mimetype: attachment.mimeType,
         caption,
       });
+      return;
+    }
+    if (attachment.category === 'video') {
+      await activeSock.sendMessage(jid, {
+        video: attachment.buffer,
+        mimetype: attachment.mimeType,
+        caption,
+      });
+      return;
+    }
+    // PDFs ('pdf') and all other business/media files ('document') deliver as native WhatsApp document bubble with filename + caption
+    await activeSock.sendMessage(jid, {
+      document: attachment.buffer,
+      mimetype: attachment.mimeType,
+      fileName: attachment.fileName,
+      caption,
+    });
+  };
+
+  try {
+    await sendPrimaryPayload(sock);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    const retrySock = await waitForActiveWaSocket(8000);
+    try {
+      await sendPrimaryPayload(retrySock);
     } catch {
-      await retrySock.sendMessage(jid, { text: caption });
+      // Fallback: try sending as WhatsApp document attachment with caption so large/unusual image or video codecs still deliver the file!
+      try {
+        await retrySock.sendMessage(jid, {
+          document: attachment.buffer,
+          mimetype: attachment.mimeType || 'application/octet-stream',
+          fileName: attachment.fileName,
+          caption,
+        });
+      } catch {
+        await retrySock.sendMessage(jid, { text: caption });
+      }
     }
   }
 }
@@ -2193,32 +3383,66 @@ async function sendPrestairWhatsAppReplyWithSingleImage(
   rawPhone: string,
   captionText: string,
   options?: {
+    sendFirst?: boolean;
     sendSecond?: boolean;
     secondCaptionText?: string;
+    sendThird?: boolean;
+    thirdCaptionText?: string;
   }
 ): Promise<void> {
   await ensureWaMetaHydratedFromRtdb();
-  const jid = await resolveWhatsAppJid(rawPhone);
-
-  // Message 1: First Separate Image + Text Confirmation
-  const firstImage = resolveFirstPrestairReplyImage();
-  const cleanFirstCaption = captionText.trim() || DEFAULT_PRESTAIR_WHATSAPP_REPLY;
-  await sendSingleWhatsAppMediaOrText(jid, cleanFirstCaption, firstImage);
-
-  // Message 2: Second Separate Image + Text Confirmation
+  const shouldSendFirst =
+    typeof options?.sendFirst === 'boolean'
+      ? options.sendFirst
+      : waSettings.firstMessageEnabled !== false;
   const shouldSendSecond =
     typeof options?.sendSecond === 'boolean'
       ? options.sendSecond
       : waSettings.secondMessageEnabled !== false;
+  const shouldSendThird =
+    typeof options?.sendThird === 'boolean'
+      ? options.sendThird
+      : Boolean(waSettings.thirdMessageEnabled);
 
+  if (!shouldSendFirst && !shouldSendSecond && !shouldSendThird) {
+    return;
+  }
+
+  const jid = await resolveWhatsAppJid(rawPhone);
+  let sentCount = 0;
+
+  // Message 1: First Separate Attachment (Image / PDF / Video / Any File) + Text Confirmation
+  if (shouldSendFirst) {
+    const firstAttachment = resolveSlotAttachment(1);
+    const cleanFirstCaption = captionText.trim() || DEFAULT_PRESTAIR_WHATSAPP_REPLY;
+    await sendSingleWhatsAppAttachmentOrText(jid, cleanFirstCaption, firstAttachment);
+    sentCount += 1;
+  }
+
+  // Message 2: Second Separate Attachment (Image / PDF / Video / Any File) + Text Confirmation
   if (shouldSendSecond) {
-    // Wait 1.4s so Message 2 always gets a distinct >1s Unix timestamp in Baileys and arrives as a clean 2nd bubble
-    await new Promise((resolve) => setTimeout(resolve, 1400));
-    const secondImage = resolveSecondPrestairReplyImage();
+    if (sentCount > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1400));
+    }
+    const secondAttachment = resolveSlotAttachment(2);
     const cleanSecondCaption =
       (options?.secondCaptionText ?? waSettings.secondMessageTemplate).trim() ||
       DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY;
-    await sendSingleWhatsAppMediaOrText(jid, cleanSecondCaption, secondImage);
+    await sendSingleWhatsAppAttachmentOrText(jid, cleanSecondCaption, secondAttachment);
+    sentCount += 1;
+  }
+
+  // Message 3: Third Separate Attachment (Video / PDF / Image / Any File) + Text Confirmation
+  if (shouldSendThird) {
+    if (sentCount > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1400));
+    }
+    const thirdAttachment = resolveSlotAttachment(3);
+    const cleanThirdCaption =
+      (options?.thirdCaptionText ?? waSettings.thirdMessageTemplate).trim() ||
+      DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY;
+    await sendSingleWhatsAppAttachmentOrText(jid, cleanThirdCaption, thirdAttachment);
+    sentCount += 1;
   }
 }
 
@@ -2249,6 +3473,13 @@ async function notifyAdminPhoneOnNewLead(lead: LeadRecord): Promise<void> {
 function dispatchLeadAutoReplyInBackground(lead: LeadRecord): boolean {
   const digits = normalizePhoneForWhatsApp(lead.phone);
   if (!digits || digits === '91' || digits.length < 8) return false;
+  if (
+    !waSettings.firstMessageEnabled &&
+    !waSettings.secondMessageEnabled &&
+    !waSettings.thirdMessageEnabled
+  ) {
+    return false;
+  }
   if (inFlightLeadWaDispatches.has(lead.leadId)) return true;
 
   const messageText = buildWhatsAppConfirmationMessage(lead, waSettings.messageTemplate);
@@ -2256,14 +3487,21 @@ function dispatchLeadAutoReplyInBackground(lead: LeadRecord): boolean {
     lead,
     waSettings.secondMessageTemplate
   );
+  const thirdMessageText = buildWhatsAppConfirmationMessage(
+    lead,
+    waSettings.thirdMessageTemplate
+  );
 
   if (waState.status === 'connected' && waSocket) {
     inFlightLeadWaDispatches.add(lead.leadId);
     void (async () => {
       try {
         await sendPrestairWhatsAppReplyWithSingleImage(lead.phone, messageText, {
+          sendFirst: waSettings.firstMessageEnabled,
           sendSecond: waSettings.secondMessageEnabled,
           secondCaptionText: secondMessageText,
+          sendThird: waSettings.thirdMessageEnabled,
+          thirdCaptionText: thirdMessageText,
         });
         const latest = leadsStore.get(lead.leadId);
         if (latest && !deletedLeadIds.has(lead.leadId)) {
@@ -2291,9 +3529,12 @@ function dispatchLeadAutoReplyInBackground(lead: LeadRecord): boolean {
   if (isRemoteCloudWorkerActive()) {
     void enqueueCloudWaDispatchJob({
       phone: lead.phone,
+      sendFirst: waSettings.firstMessageEnabled,
       text: messageText,
       sendSecond: waSettings.secondMessageEnabled,
       secondText: secondMessageText,
+      sendThird: waSettings.thirdMessageEnabled,
+      thirdText: thirdMessageText,
       leadId: lead.leadId,
     });
     return true;
@@ -2368,7 +3609,7 @@ async function startServer(): Promise<void> {
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '4mb' }));
+  app.use(express.json({ limit: '32mb' }));
 
   // --------------------------------------------------------------------------
   // Health Check (Railway / Cloud Run / AI Studio)
@@ -2866,18 +4107,36 @@ async function startServer(): Promise<void> {
         return;
       }
 
+      const activeCount =
+        (waSettings.firstMessageEnabled ? 1 : 0) +
+        (waSettings.secondMessageEnabled ? 1 : 0) +
+        (waSettings.thirdMessageEnabled ? 1 : 0);
+      if (activeCount === 0) {
+        res.status(400).json({
+          error: 'Please enable at least 1 message (1, 2, or 3) in the WhatsApp tab first.',
+        });
+        return;
+      }
+
       const messageText = buildWhatsAppConfirmationMessage(lead, waSettings.messageTemplate);
       const secondMessageText = buildWhatsAppConfirmationMessage(
         lead,
         waSettings.secondMessageTemplate
+      );
+      const thirdMessageText = buildWhatsAppConfirmationMessage(
+        lead,
+        waSettings.thirdMessageTemplate
       );
 
       if (waState.status === 'connected' && waSocket) {
         void (async () => {
           try {
             await sendPrestairWhatsAppReplyWithSingleImage(lead.phone, messageText, {
+              sendFirst: waSettings.firstMessageEnabled,
               sendSecond: waSettings.secondMessageEnabled,
               secondCaptionText: secondMessageText,
+              sendThird: waSettings.thirdMessageEnabled,
+              thirdCaptionText: thirdMessageText,
             });
             const cur = leadsStore.get(leadId);
             if (cur && !deletedLeadIds.has(leadId)) {
@@ -2896,20 +4155,23 @@ async function startServer(): Promise<void> {
             waState.lastError = (err as Error)?.message || 'Failed sending WhatsApp reply.';
           }
         })();
-        res.json({ ok: true, relayedViaCloud: false });
+        res.json({ ok: true, relayedViaCloud: false, activeCount });
         return;
       }
 
       if (isRemoteCloudWorkerActive()) {
         const queued = await enqueueCloudWaDispatchJob({
           phone: lead.phone,
+          sendFirst: waSettings.firstMessageEnabled,
           text: messageText,
           sendSecond: waSettings.secondMessageEnabled,
           secondText: secondMessageText,
+          sendThird: waSettings.thirdMessageEnabled,
+          thirdText: thirdMessageText,
           leadId: lead.leadId,
         });
         if (queued) {
-          res.json({ ok: true, relayedViaCloud: true });
+          res.json({ ok: true, relayedViaCloud: true, activeCount });
           return;
         }
       }
@@ -3024,13 +4286,18 @@ async function startServer(): Promise<void> {
       lastError: waState.lastError,
       settings: {
         autoReplyEnabled: waSettings.autoReplyEnabled,
+        firstMessageEnabled: waSettings.firstMessageEnabled,
         messageTemplate: waSettings.messageTemplate,
         secondMessageEnabled: waSettings.secondMessageEnabled,
         secondMessageTemplate: waSettings.secondMessageTemplate,
+        thirdMessageEnabled: waSettings.thirdMessageEnabled,
+        thirdMessageTemplate: waSettings.thirdMessageTemplate,
         adminNotifyPhone: waSettings.adminNotifyPhone,
       },
       replyImage: getReplyImageStatusPayload(waReplyImage),
       replyImage2: getReplyImageStatusPayload(waReplyImage2),
+      replyVideo3: getReplyVideoStatusPayload(waReplyVideo3),
+      slotMedia: getAllSlotsStatusPayload(),
     });
   });
 
@@ -3082,6 +4349,10 @@ async function startServer(): Promise<void> {
         typeof body.autoReplyEnabled === 'boolean'
           ? body.autoReplyEnabled
           : waSettings.autoReplyEnabled,
+      firstMessageEnabled:
+        typeof body.firstMessageEnabled === 'boolean'
+          ? body.firstMessageEnabled
+          : waSettings.firstMessageEnabled,
       messageTemplate:
         typeof body.messageTemplate === 'string' && body.messageTemplate.trim()
           ? body.messageTemplate.slice(0, 4000)
@@ -3094,6 +4365,14 @@ async function startServer(): Promise<void> {
         typeof body.secondMessageTemplate === 'string' && body.secondMessageTemplate.trim()
           ? body.secondMessageTemplate.slice(0, 4000)
           : DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY,
+      thirdMessageEnabled:
+        typeof body.thirdMessageEnabled === 'boolean'
+          ? body.thirdMessageEnabled
+          : waSettings.thirdMessageEnabled,
+      thirdMessageTemplate:
+        typeof body.thirdMessageTemplate === 'string' && body.thirdMessageTemplate.trim()
+          ? body.thirdMessageTemplate.slice(0, 4000)
+          : DEFAULT_PRESTAIR_THIRD_WHATSAPP_REPLY,
       adminNotifyPhone:
         typeof body.adminNotifyPhone === 'string'
           ? sanitizeField(body.adminNotifyPhone, 32)
@@ -3162,11 +4441,348 @@ async function startServer(): Promise<void> {
     }
   );
 
+  app.get(
+    '/api/whatsapp/reply-video',
+    requireAdminAuth,
+    async (_req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store');
+      await ensureWaMetaHydratedFromRtdb();
+      const status = getReplyVideoStatusPayload(waReplyVideo3);
+      res.json({
+        ok: true,
+        ...status,
+        dataUrl:
+          status.hasVideo && waReplyVideo3.mimeType && waReplyVideo3.base64Data
+            ? `data:${waReplyVideo3.mimeType};base64,${waReplyVideo3.base64Data}`
+            : null,
+      });
+    }
+  );
+
+  app.post(
+    '/api/whatsapp/reply-video',
+    requireAdminAuth,
+    async (req: Request, res: Response) => {
+      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+        string,
+        unknown
+      >;
+      const rawMode = body.mode;
+      if (rawMode !== 'custom' && rawMode !== 'none') {
+        res.status(400).json({ error: 'Invalid video mode.' });
+        return;
+      }
+
+      if (rawMode === 'custom') {
+        const rawDataUrl = typeof body.dataUrl === 'string' ? body.dataUrl : '';
+        const validated = parseAndValidateReplyVideoDataUrl(rawDataUrl);
+        if (!validated.valid) {
+          res.status(400).json({ error: validated.error });
+          return;
+        }
+        waReplyVideo3 = {
+          mode: 'custom',
+          mimeType: validated.mimeType,
+          fileName: sanitizeVideoFileName(body.fileName),
+          byteLength: validated.byteLength,
+          base64Data: validated.base64Data,
+          updatedAt: Date.now(),
+        };
+      } else {
+        waReplyVideo3 = {
+          mode: 'none',
+          mimeType: '',
+          fileName: '',
+          byteLength: 0,
+          base64Data: '',
+          updatedAt: Date.now(),
+        };
+      }
+
+      persistWaReplyVideo3Local();
+      await pushWaReplyVideo3ToRtdb();
+
+      res.json({
+        ok: true,
+        replyVideo3: getReplyVideoStatusPayload(waReplyVideo3),
+      });
+    }
+  );
+
+  // Unified 3-Slot Universal File Endpoints (Accepts PDF, Image, Video, Office, ZIP, CAD, or any valid file up to 25 MB)
+  app.get(
+    '/api/whatsapp/slot-media/:slot',
+    requireAdminAuth,
+    async (req: Request, res: Response) => {
+      const slot = parseValidSlotNumber(req.params.slot);
+      if (!slot) {
+        res.status(400).json({ error: 'Invalid message slot. Use 1, 2, or 3.' });
+        return;
+      }
+
+      await ensureWaMetaHydratedFromRtdb();
+      const resolved = resolveSlotAttachment(slot);
+      if (!resolved) {
+        res.status(404).json({ error: `No file attached to Message ${slot}.` });
+        return;
+      }
+
+      const safeDownloadName = sanitizeAttachmentFileName(resolved.fileName).replace(/"/g, '_');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      res.setHeader('Content-Type', resolved.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Length', String(resolved.buffer.length));
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${safeDownloadName}"; filename*=UTF-8''${encodeURIComponent(
+          safeDownloadName
+        )}`
+      );
+      res.end(resolved.buffer);
+    }
+  );
+
+  app.post(
+    '/api/whatsapp/slot-media/:slot',
+    requireAdminAuth,
+    express.raw({ type: 'application/octet-stream', limit: '26mb' }),
+    async (req: Request, res: Response) => {
+      const slot = parseValidSlotNumber(req.params.slot);
+      if (!slot) {
+        res.status(400).json({ error: 'Invalid message slot. Use 1, 2, or 3.' });
+        return;
+      }
+
+      const rawBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const rawFileNameHeader = req.headers['x-file-name'];
+      const rawFileMimeHeader = req.headers['x-file-mime'];
+
+      const validated = detectAndValidateAttachment(
+        rawBuf,
+        Array.isArray(rawFileMimeHeader) ? rawFileMimeHeader[0] : rawFileMimeHeader,
+        Array.isArray(rawFileNameHeader) ? rawFileNameHeader[0] : rawFileNameHeader
+      );
+      if (!validated.valid) {
+        res.status(400).json({ error: validated.error });
+        return;
+      }
+
+      const now = Date.now();
+      writeBinaryFileSafe(getSlotPaths(slot).binPath, rawBuf);
+      waSlotMedia[slot] = {
+        mode: 'custom',
+        mimeType: validated.mimeType,
+        fileName: validated.fileName,
+        byteLength: validated.byteLength,
+        category: validated.category,
+        updatedAt: now,
+      };
+      persistWaSlotMetaLocal(slot, waSlotMedia[slot]);
+
+      // Auto-enable this message slot in WhatsApp settings so the uploaded PDF/Image/Video/Doc is active immediately
+      let settingsChanged = false;
+      if (slot === 1 && !waSettings.firstMessageEnabled) {
+        waSettings = { ...waSettings, firstMessageEnabled: true, updatedAt: now };
+        settingsChanged = true;
+      } else if (slot === 2 && !waSettings.secondMessageEnabled) {
+        waSettings = { ...waSettings, secondMessageEnabled: true, updatedAt: now };
+        settingsChanged = true;
+      } else if (slot === 3 && !waSettings.thirdMessageEnabled) {
+        waSettings = { ...waSettings, thirdMessageEnabled: true, updatedAt: now };
+        settingsChanged = true;
+      }
+      if (settingsChanged) {
+        persistWaSettingsLocal();
+        void pushWaSettingsToRtdb();
+      }
+
+      // Mirror standard <= 2MB raster images into legacy waReplyImage / waReplyImage2 for Showcase tab compatibility
+      if (
+        (slot === 1 || slot === 2) &&
+        (validated.mimeType === 'image/jpeg' ||
+          validated.mimeType === 'image/png' ||
+          validated.mimeType === 'image/webp') &&
+        rawBuf.length <= MAX_REPLY_IMAGE_BYTES
+      ) {
+        const legacyState: WhatsAppReplyImageState = {
+          mode: 'custom',
+          mimeType: validated.mimeType,
+          base64Data: rawBuf.toString('base64'),
+          updatedAt: now,
+        };
+        if (slot === 1) {
+          waReplyImage = legacyState;
+          persistWaReplyImageLocal();
+          void pushWaReplyImageToRtdb();
+        } else {
+          waReplyImage2 = legacyState;
+          persistWaReplyImage2Local();
+          void pushWaReplyImage2ToRtdb();
+        }
+      }
+
+      // Sync chunked binary to Firebase RTDB (race with 1.2s so Admin UI responds fast even for 20 MB files)
+      const syncPromise = pushWaSlotMediaToRtdb(slot);
+      await Promise.race([
+        syncPromise,
+        new Promise((resolve) => setTimeout(resolve, 1200)),
+      ]);
+
+      res.json({
+        ok: true,
+        slot,
+        slotMedia: getAllSlotsStatusPayload(),
+        settings: {
+          autoReplyEnabled: waSettings.autoReplyEnabled,
+          firstMessageEnabled: waSettings.firstMessageEnabled,
+          messageTemplate: waSettings.messageTemplate,
+          secondMessageEnabled: waSettings.secondMessageEnabled,
+          secondMessageTemplate: waSettings.secondMessageTemplate,
+          thirdMessageEnabled: waSettings.thirdMessageEnabled,
+          thirdMessageTemplate: waSettings.thirdMessageTemplate,
+          adminNotifyPhone: waSettings.adminNotifyPhone,
+        },
+        replyImage: getReplyImageStatusPayload(waReplyImage),
+        replyImage2: getReplyImageStatusPayload(waReplyImage2),
+      });
+    }
+  );
+
+  app.post(
+    '/api/whatsapp/slot-media/:slot/mode',
+    requireAdminAuth,
+    async (req: Request, res: Response) => {
+      const slot = parseValidSlotNumber(req.params.slot);
+      if (!slot) {
+        res.status(400).json({ error: 'Invalid message slot. Use 1, 2, or 3.' });
+        return;
+      }
+
+      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+        string,
+        unknown
+      >;
+      const rawMode = body.mode;
+      if (rawMode !== 'default' && rawMode !== 'none' && rawMode !== 'custom') {
+        res.status(400).json({ error: 'Invalid slot mode.' });
+        return;
+      }
+
+      if (rawMode === 'default' && slot === 3) {
+        res.status(400).json({ error: 'Message 3 does not have a built-in default image. Upload any file or choose No File.' });
+        return;
+      }
+
+      const now = Date.now();
+      if (rawMode === 'custom') {
+        // Used by built-in Canvas Image Editor ('Apply & Save Image')
+        const rawDataUrl = typeof body.dataUrl === 'string' ? body.dataUrl : '';
+        const parsedImg = parseAndValidateReplyImageDataUrl(rawDataUrl);
+        if (!parsedImg.valid) {
+          res.status(400).json({ error: parsedImg.error });
+          return;
+        }
+        const imgBuf = Buffer.from(parsedImg.base64Data, 'base64');
+        const ext = parsedImg.mimeType === 'image/png' ? '.png' : parsedImg.mimeType === 'image/webp' ? '.webp' : '.jpg';
+        const cleanName = sanitizeAttachmentFileName(body.fileName || `prestair-edited-${slot}${ext}`, ext);
+
+        writeBinaryFileSafe(getSlotPaths(slot).binPath, imgBuf);
+        waSlotMedia[slot] = {
+          mode: 'custom',
+          mimeType: parsedImg.mimeType,
+          fileName: cleanName,
+          byteLength: imgBuf.length,
+          category: 'image',
+          updatedAt: now,
+        };
+        persistWaSlotMetaLocal(slot, waSlotMedia[slot]);
+
+        if (slot === 1 || slot === 2) {
+          const legacyState: WhatsAppReplyImageState = {
+            mode: 'custom',
+            mimeType: parsedImg.mimeType,
+            base64Data: parsedImg.base64Data,
+            updatedAt: now,
+          };
+          if (slot === 1) {
+            waReplyImage = legacyState;
+            persistWaReplyImageLocal();
+            void pushWaReplyImageToRtdb();
+          } else {
+            waReplyImage2 = legacyState;
+            persistWaReplyImage2Local();
+            void pushWaReplyImage2ToRtdb();
+          }
+        }
+      } else {
+        removeSlotBinarySafe(slot);
+        waSlotMedia[slot] = {
+          mode: rawMode,
+          mimeType: '',
+          fileName: '',
+          byteLength: 0,
+          category: slot === 3 ? 'document' : 'image',
+          updatedAt: now,
+        };
+        persistWaSlotMetaLocal(slot, waSlotMedia[slot]);
+
+        if (slot === 1) {
+          waReplyImage = {
+            mode: rawMode,
+            mimeType: '',
+            base64Data: '',
+            updatedAt: now,
+          };
+          persistWaReplyImageLocal();
+          void pushWaReplyImageToRtdb();
+        } else if (slot === 2) {
+          waReplyImage2 = {
+            mode: rawMode,
+            mimeType: '',
+            base64Data: '',
+            updatedAt: now,
+          };
+          persistWaReplyImage2Local();
+          void pushWaReplyImage2ToRtdb();
+        } else if (slot === 3) {
+          waReplyVideo3 = {
+            mode: 'none',
+            mimeType: '',
+            fileName: '',
+            byteLength: 0,
+            base64Data: '',
+            updatedAt: now,
+          };
+          persistWaReplyVideo3Local();
+          void pushWaReplyVideo3ToRtdb();
+        }
+      }
+
+      await Promise.race([
+        pushWaSlotMediaToRtdb(slot),
+        new Promise((resolve) => setTimeout(resolve, 1200)),
+      ]);
+
+      res.json({
+        ok: true,
+        slot,
+        slotMedia: getAllSlotsStatusPayload(),
+        replyImage: getReplyImageStatusPayload(waReplyImage),
+        replyImage2: getReplyImageStatusPayload(waReplyImage2),
+      });
+    }
+  );
+
   app.post(
     '/api/whatsapp/test-message',
     requireAdminAuth,
     async (req: Request, res: Response) => {
       const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+      const sendFirst =
+        typeof req.body?.sendFirst === 'boolean'
+          ? req.body.sendFirst
+          : waSettings.firstMessageEnabled;
       const text =
         typeof req.body?.text === 'string' && req.body.text.trim()
           ? req.body.text.slice(0, 4000)
@@ -3179,6 +4795,14 @@ async function startServer(): Promise<void> {
         typeof req.body?.secondText === 'string' && req.body.secondText.trim()
           ? req.body.secondText.slice(0, 4000)
           : waSettings.secondMessageTemplate;
+      const sendThird =
+        typeof req.body?.sendThird === 'boolean'
+          ? req.body.sendThird
+          : waSettings.thirdMessageEnabled;
+      const thirdText =
+        typeof req.body?.thirdText === 'string' && req.body.thirdText.trim()
+          ? req.body.thirdText.slice(0, 4000)
+          : waSettings.thirdMessageTemplate;
 
       const digits = normalizePhoneForWhatsApp(phone);
       if (!digits || digits.length < 8) {
@@ -3186,13 +4810,25 @@ async function startServer(): Promise<void> {
         return;
       }
 
+      if (!sendFirst && !sendSecond && !sendThird) {
+        res.status(400).json({
+          error: 'Please select at least 1 message (1, 2, or 3) before sending a test.',
+        });
+        return;
+      }
+
+      const activeCount = (sendFirst ? 1 : 0) + (sendSecond ? 1 : 0) + (sendThird ? 1 : 0);
+
       if (waState.status === 'connected' && waSocket) {
         try {
           await sendPrestairWhatsAppReplyWithSingleImage(phone, text, {
+            sendFirst,
             sendSecond,
             secondCaptionText: secondText,
+            sendThird,
+            thirdCaptionText: thirdText,
           });
-          res.json({ ok: true, relayedViaCloud: false });
+          res.json({ ok: true, relayedViaCloud: false, activeCount });
         } catch (err) {
           res.status(500).json({
             error: (err as Error)?.message || 'Failed delivering WhatsApp test messages.',
@@ -3204,12 +4840,15 @@ async function startServer(): Promise<void> {
       if (isRemoteCloudWorkerActive()) {
         const queued = await enqueueCloudWaDispatchJob({
           phone,
+          sendFirst,
           text,
           sendSecond,
           secondText,
+          sendThird,
+          thirdText,
         });
         if (queued) {
-          res.json({ ok: true, relayedViaCloud: true });
+          res.json({ ok: true, relayedViaCloud: true, activeCount });
           return;
         }
       }
