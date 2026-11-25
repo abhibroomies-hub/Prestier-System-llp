@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
+  Copy,
   Download,
   FileSpreadsheet,
   FileText,
@@ -1018,7 +1019,8 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
 }) => {
   const [waStatus, setWaStatus] = useState<WhatsAppStatusPayload | null>(null);
   const [isLoadingWa, setIsLoadingWa] = useState(false);
-  const [pairingPhone, setPairingPhone] = useState('');
+  const [pairingPhone, setPairingPhone] = useState('917428545777');
+  const [copiedPairingCode, setCopiedPairingCode] = useState(false);
   const [testPhone, setTestPhone] = useState('');
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testFeedback, setTestFeedback] = useState<string | null>(null);
@@ -1125,8 +1127,9 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
   const handleStartWhatsApp = async (usePairingPhone = false) => {
     setIsLoadingWa(true);
     setTestFeedback(null);
+    setCopiedPairingCode(false);
     try {
-      await fetch('/api/whatsapp/connect', {
+      const res = await fetch('/api/whatsapp/connect', {
         method: 'POST',
         headers: {
           ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
@@ -1136,9 +1139,24 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
           pairingPhone: usePairingPhone ? pairingPhone.trim() : '',
         }),
       });
-      setTimeout(() => {
-        void fetchWhatsAppStatus(false);
-      }, 1200);
+      if (res.ok) {
+        const snap = (await res.json().catch(() => null)) as Partial<WhatsAppStatusPayload> | null;
+        if (snap && snap.status) {
+          setWaStatus((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  status: snap.status || prev.status,
+                  qrDataUrl: snap.qrDataUrl ?? null,
+                  pairingCode: snap.pairingCode ?? null,
+                  connectedNumber: snap.connectedNumber ?? prev.connectedNumber,
+                  lastError: snap.lastError ?? null,
+                }
+              : prev
+          );
+        }
+      }
+      await fetchWhatsAppStatus(false);
     } finally {
       setIsLoadingWa(false);
     }
@@ -1323,7 +1341,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
           </div>
 
           <p className="text-xs text-slate-600 leading-relaxed">
-            Auto-keepalive heartbeat runs every 20 seconds with logout-safe session protection. If linked on your 24x7 Railway server, AI Studio automatically relays messages through it without logging out your session.
+            Encrypted Cloud Session Backup keeps your WhatsApp linked across every GitHub push, Railway container redeploy, and restart—with single-leader protection so servers never log each other out.
           </p>
 
           {waStatus?.lastError && (
@@ -1347,13 +1365,41 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
           )}
 
           {waStatus?.pairingCode && !isLocalConnected && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-center space-y-1">
-              <p className="text-xs font-medium text-emerald-800">
-                Enter this 8-character Pairing Code on WhatsApp:
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-2.5">
+              <p className="text-xs font-medium text-emerald-900 text-center leading-relaxed">
+                Open WhatsApp on your phone → Linked Devices → Link a Device → Link with phone number instead:
               </p>
-              <p className="font-mono text-xl font-bold tracking-widest text-emerald-950 tabular-nums">
-                {waStatus.pairingCode}
-              </p>
+              <div className="flex items-center justify-center gap-2.5">
+                <p className="font-mono text-2xl font-bold tracking-widest text-emerald-950 tabular-nums select-all">
+                  {waStatus.pairingCode}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!waStatus.pairingCode) return;
+                    void navigator.clipboard
+                      ?.writeText(waStatus.pairingCode.replace(/-/g, ''))
+                      .then(() => {
+                        setCopiedPairingCode(true);
+                        setTimeout(() => setCopiedPairingCode(false), 2000);
+                      })
+                      .catch(() => {});
+                  }}
+                  className="min-h-9 inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-900 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  {copiedPairingCode ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      <span>Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3.5 w-3.5" />
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           )}
 
@@ -1363,7 +1409,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                 htmlFor="wa-pairing-phone"
                 className="block text-xs font-semibold text-slate-700"
               >
-                Or Link with Phone Number Pairing Code
+                Link with Phone Number Pairing Code (No QR Scan Required)
               </label>
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <input
@@ -1371,7 +1417,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                   type="tel"
                   value={pairingPhone}
                   onChange={(e) => setPairingPhone(e.target.value)}
-                  placeholder="e.g. 919876543210"
+                  placeholder="e.g. 917428545777"
                   className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 sm:py-2 text-base sm:text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-600 tabular-nums"
                 />
                 <button
@@ -1380,7 +1426,7 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
                   disabled={isLoadingWa || !pairingPhone.trim()}
                   className="min-h-10 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold px-3.5 py-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  Get Code
+                  {isLoadingWa ? 'Generating…' : 'Get Pairing Code'}
                 </button>
               </div>
             </div>

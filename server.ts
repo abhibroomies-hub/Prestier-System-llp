@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { getApps, initializeApp } from 'firebase/app';
 import {
@@ -3040,15 +3041,113 @@ async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
 }
 
 let connectionReplacedAtMs = 0;
+let localWaVaultSyncedAt = 0;
+let waVaultPushTimer: ReturnType<typeof setTimeout> | null = null;
+let isPushingWaVault = false;
+
+interface WaAuthVaultRtdbRecord {
+  v: 1;
+  iv: string;
+  tag: string;
+  data: string;
+  connectedNumber: string | null;
+  writerId: string;
+  updatedAt: number;
+}
+
+async function ensureAdminAuthHydratedFromRtdb(): Promise<void> {
+  if (adminAuth || !rtdbInstance) return;
+  try {
+    const snap = await get(ref(rtdbInstance, 'meta/adminAuth'));
+    const remote = snap.val() as Partial<AdminAuthRecord> | null;
+    if (
+      remote &&
+      typeof remote.salt === 'string' &&
+      remote.salt.length >= 16 &&
+      typeof remote.passwordHash === 'string' &&
+      remote.passwordHash.length >= 32
+    ) {
+      adminAuth = {
+        salt: remote.salt,
+        passwordHash: remote.passwordHash,
+        updatedAt: typeof remote.updatedAt === 'number' ? remote.updatedAt : 1,
+      };
+      persistAdminAuthLocal();
+    }
+  } catch {
+    // ignore transient RTDB read failure
+  }
+}
+
+function getCandidateWaVaultKeys(): Buffer[] {
+  const keys: Buffer[] = [];
+  const customSecret = (process.env.WA_SESSION_SECRET || '').trim();
+  if (customSecret) {
+    keys.push(crypto.scryptSync(customSecret, 'prestier-wa-vault-v1', 32));
+  }
+  const envPass = (process.env.ADMIN_PASSCODE || '').trim();
+  if (envPass) {
+    keys.push(crypto.scryptSync(envPass, 'prestier-wa-vault-pass-v1', 32));
+  }
+  if (adminAuth?.passwordHash && adminAuth?.salt) {
+    keys.push(
+      crypto.scryptSync(adminAuth.passwordHash, `${adminAuth.salt}:prestier-wa-vault-v1`, 32)
+    );
+  }
+  keys.push(
+    crypto.scryptSync(RTDB_DATABASE_URL || 'prestier-final', 'prestier-wa-vault-boot-v1', 32)
+  );
+  return keys;
+}
+
+async function refreshRemoteWaRuntimeFromRtdb(): Promise<void> {
+  if (!rtdbInstance) return;
+  try {
+    const snap = await get(ref(rtdbInstance, 'meta/waRuntimeStatus'));
+    const val = snap.val() as Partial<RemoteWaRuntimeStatus> | null;
+    if (
+      val &&
+      typeof val.instanceId === 'string' &&
+      typeof val.status === 'string' &&
+      typeof val.updatedAt === 'number'
+    ) {
+      remoteWaRuntime = {
+        instanceId: val.instanceId,
+        status: val.status,
+        connectedNumber: typeof val.connectedNumber === 'string' ? val.connectedNumber : null,
+        updatedAt: val.updatedAt,
+      };
+    } else {
+      remoteWaRuntime = null;
+    }
+  } catch {
+    // ignore transient RTDB read failure
+  }
+}
+
+function parseCredsRegistrationInfo(rawJson: string): { valid: boolean; registered: boolean } {
+  try {
+    const trimmed = rawJson.trim();
+    if (trimmed.length <= 20) return { valid: false, registered: false };
+    const parsed = JSON.parse(trimmed) as {
+      registered?: boolean;
+      me?: { id?: string };
+    };
+    const isReg = Boolean(parsed?.registered || parsed?.me?.id);
+    return { valid: true, registered: isReg };
+  } catch {
+    return { valid: false, registered: false };
+  }
+}
 
 function ensureValidWhatsAppCredsFile(): boolean {
   const credsPath = path.join(WHATSAPP_AUTH_DIR, 'creds.json');
   const backupPath = path.join(WHATSAPP_AUTH_DIR, 'creds.backup.json');
   try {
     if (fs.existsSync(credsPath)) {
-      const raw = fs.readFileSync(credsPath, 'utf8').trim();
-      if (raw.length > 20) {
-        JSON.parse(raw);
+      const raw = fs.readFileSync(credsPath, 'utf8');
+      const info = parseCredsRegistrationInfo(raw);
+      if (info.valid) {
         return true;
       }
     }
@@ -3058,9 +3157,9 @@ function ensureValidWhatsAppCredsFile(): boolean {
 
   try {
     if (fs.existsSync(backupPath)) {
-      const backupRaw = fs.readFileSync(backupPath, 'utf8').trim();
-      if (backupRaw.length > 20) {
-        JSON.parse(backupRaw);
+      const backupRaw = fs.readFileSync(backupPath, 'utf8');
+      const info = parseCredsRegistrationInfo(backupRaw);
+      if (info.valid) {
         fs.writeFileSync(credsPath, backupRaw, 'utf8');
         return true;
       }
@@ -3071,14 +3170,24 @@ function ensureValidWhatsAppCredsFile(): boolean {
   return false;
 }
 
+function hasRegisteredWhatsAppCreds(): boolean {
+  if (!ensureValidWhatsAppCredsFile()) return false;
+  try {
+    const credsPath = path.join(WHATSAPP_AUTH_DIR, 'creds.json');
+    const raw = fs.readFileSync(credsPath, 'utf8');
+    return parseCredsRegistrationInfo(raw).registered;
+  } catch {
+    return false;
+  }
+}
+
 function backupWhatsAppCredsSafe(): void {
   const credsPath = path.join(WHATSAPP_AUTH_DIR, 'creds.json');
   const backupPath = path.join(WHATSAPP_AUTH_DIR, 'creds.backup.json');
   try {
     if (!fs.existsSync(credsPath)) return;
     const raw = fs.readFileSync(credsPath, 'utf8').trim();
-    if (raw.length > 20) {
-      JSON.parse(raw);
+    if (parseCredsRegistrationInfo(raw).valid) {
       const tmpPath = `${backupPath}.tmp`;
       fs.writeFileSync(tmpPath, raw, 'utf8');
       fs.renameSync(tmpPath, backupPath);
@@ -3089,7 +3198,169 @@ function backupWhatsAppCredsSafe(): void {
 }
 
 function hasSavedWhatsAppCreds(): boolean {
-  return ensureValidWhatsAppCredsFile();
+  return hasRegisteredWhatsAppCreds();
+}
+
+async function pushWaAuthVaultToRtdbImmediate(): Promise<void> {
+  if (!rtdbInstance || explicitUnlinkRequested || isPushingWaVault) return;
+  if (!hasRegisteredWhatsAppCreds()) return;
+
+  isPushingWaVault = true;
+  try {
+    await ensureAdminAuthHydratedFromRtdb();
+    const primaryKey = getCandidateWaVaultKeys()[0];
+    const safeDirPrefix = WHATSAPP_AUTH_DIR.endsWith(path.sep)
+      ? WHATSAPP_AUTH_DIR
+      : WHATSAPP_AUTH_DIR + path.sep;
+
+    const entries = fs.readdirSync(WHATSAPP_AUTH_DIR);
+    const filesMap: Record<string, string> = {};
+    for (const name of entries) {
+      if (
+        !name.endsWith('.json') ||
+        name === 'creds.backup.json' ||
+        name.endsWith('.tmp') ||
+        !/^[A-Za-z0-9._@-]+\.json$/.test(name)
+      ) {
+        continue;
+      }
+      const fullPath = path.resolve(WHATSAPP_AUTH_DIR, name);
+      if (!fullPath.startsWith(safeDirPrefix)) continue;
+      try {
+        const content = fs.readFileSync(fullPath, 'utf8');
+        if (content.trim()) {
+          JSON.parse(content);
+          filesMap[name] = content;
+        }
+      } catch {
+        // skip mid-write file
+      }
+    }
+
+    if (!filesMap['creds.json'] || !parseCredsRegistrationInfo(filesMap['creds.json']).registered) {
+      return;
+    }
+
+    const compressed = zlib.gzipSync(Buffer.from(JSON.stringify({ files: filesMap }), 'utf8'));
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', primaryKey, iv);
+    const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    const now = Date.now();
+
+    const record: WaAuthVaultRtdbRecord = {
+      v: 1,
+      iv: iv.toString('base64'),
+      tag: authTag.toString('base64'),
+      data: encrypted.toString('base64'),
+      connectedNumber: waState.connectedNumber,
+      writerId: SERVER_INSTANCE_ID,
+      updatedAt: now,
+    };
+
+    await set(ref(rtdbInstance, 'meta/waAuthVault'), record);
+    localWaVaultSyncedAt = now;
+  } catch {
+    // ignore transient RTDB vault write error
+  } finally {
+    isPushingWaVault = false;
+  }
+}
+
+function schedulePushWaAuthVaultToRtdb(delayMs = 900): void {
+  if (explicitUnlinkRequested || isShuttingDown) return;
+  if (waVaultPushTimer) {
+    clearTimeout(waVaultPushTimer);
+  }
+  waVaultPushTimer = setTimeout(() => {
+    waVaultPushTimer = null;
+    void pushWaAuthVaultToRtdbImmediate();
+  }, delayMs);
+}
+
+async function restoreWaAuthVaultFromRtdbIfNeeded(): Promise<boolean> {
+  if (!rtdbInstance || explicitUnlinkRequested) return false;
+  if (waState.status === 'connected' && waSocket) return true;
+
+  try {
+    await ensureAdminAuthHydratedFromRtdb();
+    const snap = await get(ref(rtdbInstance, 'meta/waAuthVault'));
+    const vault = snap.val() as Partial<WaAuthVaultRtdbRecord> | null;
+    if (
+      !vault ||
+      vault.v !== 1 ||
+      typeof vault.iv !== 'string' ||
+      typeof vault.tag !== 'string' ||
+      typeof vault.data !== 'string'
+    ) {
+      return hasRegisteredWhatsAppCreds();
+    }
+
+    const remoteUpdatedAt = typeof vault.updatedAt === 'number' ? vault.updatedAt : 1;
+    const localHasRegistered = hasRegisteredWhatsAppCreds();
+    if (localHasRegistered && remoteUpdatedAt <= localWaVaultSyncedAt) {
+      return true;
+    }
+
+    const ivBuf = Buffer.from(vault.iv, 'base64');
+    const tagBuf = Buffer.from(vault.tag, 'base64');
+    const cipherBuf = Buffer.from(vault.data, 'base64');
+    if (ivBuf.length !== 12 || tagBuf.length !== 16 || cipherBuf.length === 0) {
+      return localHasRegistered;
+    }
+
+    let decryptedCompressed: Buffer | null = null;
+    for (const candidateKey of getCandidateWaVaultKeys()) {
+      try {
+        const decipher = crypto.createDecipheriv('aes-256-gcm', candidateKey, ivBuf);
+        decipher.setAuthTag(tagBuf);
+        decryptedCompressed = Buffer.concat([decipher.update(cipherBuf), decipher.final()]);
+        break;
+      } catch {
+        // try next key candidate
+      }
+    }
+    if (!decryptedCompressed) {
+      return localHasRegistered;
+    }
+
+    const unzippedStr = zlib.gunzipSync(decryptedCompressed).toString('utf8');
+    const parsed = JSON.parse(unzippedStr) as { files?: Record<string, unknown> };
+    if (!parsed?.files || typeof parsed.files !== 'object') {
+      return localHasRegistered;
+    }
+
+    const rawCreds = parsed.files['creds.json'];
+    if (typeof rawCreds !== 'string' || !parseCredsRegistrationInfo(rawCreds).registered) {
+      return localHasRegistered;
+    }
+
+    fs.mkdirSync(WHATSAPP_AUTH_DIR, { recursive: true });
+    const safeDirPrefix = WHATSAPP_AUTH_DIR.endsWith(path.sep)
+      ? WHATSAPP_AUTH_DIR
+      : WHATSAPP_AUTH_DIR + path.sep;
+
+    for (const [name, content] of Object.entries(parsed.files)) {
+      if (
+        typeof content !== 'string' ||
+        !name.endsWith('.json') ||
+        !/^[A-Za-z0-9._@-]+\.json$/.test(name)
+      ) {
+        continue;
+      }
+      const targetPath = path.resolve(WHATSAPP_AUTH_DIR, name);
+      if (!targetPath.startsWith(safeDirPrefix)) continue;
+      const tmpPath = `${targetPath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmpPath, content, { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmpPath, targetPath);
+    }
+
+    backupWhatsAppCredsSafe();
+    localWaVaultSyncedAt = remoteUpdatedAt;
+    return true;
+  } catch {
+    return hasRegisteredWhatsAppCreds();
+  }
 }
 
 function cleanupActiveSocketOnly(): void {
@@ -3111,7 +3382,14 @@ function cleanupActiveSocketOnly(): void {
 
 async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
   if (waConnectLock || isShuttingDown) return;
-  const cleanPairingDigits = normalizePhoneForWhatsApp(pairingPhoneRaw);
+  const rawPairingDigits = normalizePhoneForWhatsApp(pairingPhoneRaw);
+  const cleanPairingDigits =
+    rawPairingDigits.length >= 8 && rawPairingDigits.length <= 15 ? rawPairingDigits : '';
+  if (pairingPhoneRaw.trim() && !cleanPairingDigits) {
+    waState.lastError =
+      'Please enter a valid WhatsApp number with country code (e.g. 917428545777).';
+    return;
+  }
   if (waState.status === 'connected' && waSocket && !cleanPairingDigits) {
     return;
   }
@@ -3127,8 +3405,31 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
 
   try {
     fs.mkdirSync(WHATSAPP_AUTH_DIR, { recursive: true });
+    if (cleanPairingDigits) {
+      // If local creds are absent or unregistered from an old expired QR/pairing attempt,
+      // reset WHATSAPP_AUTH_DIR so Baileys starts a clean Noise/Signal registration for pairing code.
+      if (!hasRegisteredWhatsAppCreds()) {
+        try {
+          fs.rmSync(WHATSAPP_AUTH_DIR, { recursive: true, force: true });
+          fs.mkdirSync(WHATSAPP_AUTH_DIR, { recursive: true });
+        } catch {
+          // ignore cleanup error
+        }
+      }
+    } else {
+      await restoreWaAuthVaultFromRtdbIfNeeded();
+    }
     ensureValidWhatsAppCredsFile();
     const { state, saveCreds } = await useMultiFileAuthState(WHATSAPP_AUTH_DIR);
+
+    // Wrap Signal key mutations so rotated sessions/pre-keys stay synced to encrypted Cloud Vault across Railway deploys
+    const origKeysSet = state.keys.set.bind(state.keys);
+    state.keys.set = async (data) => {
+      await origKeysSet(data);
+      if (state.creds.registered || waState.status === 'connected') {
+        schedulePushWaAuthVaultToRtdb(1400);
+      }
+    };
 
     let version: [number, number, number] | undefined;
     try {
@@ -3147,39 +3448,68 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
       markOnlineOnConnect: false,
       syncFullHistory: false,
       keepAliveIntervalMs: 20_000,
-      connectTimeoutMs: 45_000,
-      defaultQueryTimeoutMs: 45_000,
+      connectTimeoutMs: 60_000,
+      defaultQueryTimeoutMs: 60_000,
     });
 
     waSocket = sock;
     sock.ev.on('creds.update', async () => {
       await saveCreds();
       backupWhatsAppCredsSafe();
+      if (state.creds.registered || Boolean(state.creds.me?.id)) {
+        schedulePushWaAuthVaultToRtdb(700);
+      }
     });
 
+    let pairingCodeRequested = false;
+    const issuePairingCodeOnce = async () => {
+      if (
+        pairingCodeRequested ||
+        !cleanPairingDigits ||
+        state.creds.registered ||
+        waSocket !== sock ||
+        waState.status === 'connected'
+      ) {
+        return;
+      }
+      pairingCodeRequested = true;
+      try {
+        const rawCode = (await sock.requestPairingCode(cleanPairingDigits)).trim();
+        const formattedCode =
+          rawCode.length === 8 && !rawCode.includes('-')
+            ? `${rawCode.slice(0, 4)}-${rawCode.slice(4)}`
+            : rawCode;
+        waState.pairingCode = formattedCode;
+        waState.qrDataUrl = null;
+        waState.status = 'pairing_ready';
+        waState.lastError = null;
+      } catch (err) {
+        pairingCodeRequested = false;
+        waState.lastError =
+          (err as Error)?.message || 'Could not generate pairing code. Try scanning QR instead.';
+      }
+    };
+
     if (cleanPairingDigits && !state.creds.registered) {
-      setTimeout(async () => {
-        if (waSocket !== sock || waState.status === 'connected') return;
-        try {
-          const code = await sock.requestPairingCode(cleanPairingDigits);
-          waState.pairingCode = code;
-          waState.status = 'pairing_ready';
-        } catch (err) {
-          waState.lastError =
-            (err as Error)?.message || 'Could not generate pairing code. Try scanning QR instead.';
-        }
-      }, 1800);
+      // Fallback timer if socket finishes handshake without emitting QR first
+      setTimeout(() => {
+        void issuePairingCodeOnce();
+      }, 3200);
     }
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr && !cleanPairingDigits) {
-        try {
-          waState.qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 300 });
-          waState.status = 'qr_ready';
-        } catch {
-          // ignore QR render error
+      if (qr) {
+        if (cleanPairingDigits && !state.creds.registered) {
+          void issuePairingCodeOnce();
+        } else if (!cleanPairingDigits) {
+          try {
+            waState.qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 300 });
+            waState.status = 'qr_ready';
+          } catch {
+            // ignore QR render error
+          }
         }
       }
 
@@ -3193,6 +3523,7 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
         waState.connectedNumber = `+${connectedPhone}`;
         waState.lastError = null;
         backupWhatsAppCredsSafe();
+        void pushWaAuthVaultToRtdbImmediate();
         void publishLocalWaRuntimeStatusToRtdb();
         void drainPendingWaDispatchQueueFromRtdb();
       }
@@ -3207,7 +3538,7 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
         waState.pairingCode = null;
 
         if (isShuttingDown) {
-          // Graceful container update / restart — NEVER touch WHATSAPP_AUTH_DIR
+          // Graceful container update / restart — NEVER touch WHATSAPP_AUTH_DIR or Cloud Vault
           waState.status = 'disconnected';
           return;
         }
@@ -3221,7 +3552,7 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
 
         if (statusCode === DisconnectReason.connectionReplaced) {
           // Another active deployment (e.g. 24x7 Railway server) took over the WhatsApp socket.
-          // NEVER delete local creds.json, and do NOT fight it in a reconnect loop!
+          // NEVER delete local creds.json or Cloud Vault, and do NOT fight it in a reconnect loop!
           connectionReplacedAtMs = Date.now();
           waState.status = 'disconnected';
           waState.lastError = null;
@@ -3229,30 +3560,81 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
         }
 
         if (statusCode === DisconnectReason.loggedOut) {
-          // Phone explicitly unlinked device from WhatsApp mobile app
+          // Verify whether another deployment is actively connected or rotated the Cloud Vault before wiping!
+          await refreshRemoteWaRuntimeFromRtdb();
+          if (isRemoteCloudWorkerActive()) {
+            connectionReplacedAtMs = Date.now();
+            waState.status = 'disconnected';
+            waState.lastError = null;
+            return;
+          }
+          if (rtdbInstance) {
+            try {
+              const vaultSnap = await get(ref(rtdbInstance, 'meta/waAuthVault'));
+              const remoteVault = vaultSnap.val() as Partial<WaAuthVaultRtdbRecord> | null;
+              if (
+                remoteVault &&
+                typeof remoteVault.updatedAt === 'number' &&
+                remoteVault.updatedAt > localWaVaultSyncedAt
+              ) {
+                // Newer session exists in Cloud Vault — restore and reconnect instead of wiping!
+                waState.status = 'connecting';
+                setTimeout(() => {
+                  if (!isShuttingDown && !explicitUnlinkRequested && !isRemoteCloudWorkerActive()) {
+                    void startWhatsAppConnection();
+                  }
+                }, 2000);
+                return;
+              }
+            } catch {
+              // ignore
+            }
+          }
+
+          // Phone genuinely unlinked device from WhatsApp mobile app
           waState.status = 'disconnected';
           waState.connectedNumber = null;
           waState.lastError =
             'WhatsApp session was unlinked from phone. Scan QR code once to relink.';
+          localWaVaultSyncedAt = 0;
           try {
             fs.rmSync(WHATSAPP_AUTH_DIR, { recursive: true, force: true });
             fs.mkdirSync(WHATSAPP_AUTH_DIR, { recursive: true });
           } catch {
             // ignore
           }
+          if (rtdbInstance) {
+            void remove(ref(rtdbInstance, 'meta/waAuthVault')).catch(() => {});
+          }
           return;
         }
 
-        // Transient network reset / restartRequired (515) / timeout — auto-reconnect preserving creds!
+        // If an unregistered phone-pairing code timed out before the user typed it on their phone,
+        // stop quietly and prompt for a fresh code instead of overwriting with background QR reconnects.
+        if (
+          cleanPairingDigits &&
+          statusCode !== DisconnectReason.restartRequired &&
+          !hasRegisteredWhatsAppCreds()
+        ) {
+          waState.status = 'disconnected';
+          waState.lastError =
+            'Pairing code window expired before entry on phone. Click "Get Pairing Code" for a fresh code.';
+          return;
+        }
+
+        // Transient network reset / restartRequired (515 right after QR or Pairing Code acceptance!) — auto-reconnect preserving creds!
         waState.status = 'connecting';
-        const delayMs = statusCode === DisconnectReason.restartRequired ? 1200 : 4000;
+        const delayMs = statusCode === DisconnectReason.restartRequired ? 1000 : 4000;
         if (waReconnectTimer) clearTimeout(waReconnectTimer);
         waReconnectTimer = setTimeout(() => {
-          if (!isShuttingDown && !explicitUnlinkRequested && !isRemoteCloudWorkerActive()) {
-            void startWhatsAppConnection();
-          } else if (isRemoteCloudWorkerActive()) {
-            waState.status = 'disconnected';
-          }
+          void (async () => {
+            await refreshRemoteWaRuntimeFromRtdb();
+            if (!isShuttingDown && !explicitUnlinkRequested && !isRemoteCloudWorkerActive()) {
+              void startWhatsAppConnection();
+            } else if (isRemoteCloudWorkerActive()) {
+              waState.status = 'disconnected';
+            }
+          })();
         }, delayMs);
       }
     });
@@ -3264,29 +3646,50 @@ async function startWhatsAppConnection(pairingPhoneRaw = ''): Promise<void> {
   }
 }
 
-// Publish WhatsApp 24x7 heartbeat every 15s when locally connected,
-// drain any pending relay jobs, and auto-resume saved credentials if no remote worker is active.
-setInterval(() => {
-  if (waState.status === 'connected' && waSocket) {
-    void publishLocalWaRuntimeStatusToRtdb();
-    void drainPendingWaDispatchQueueFromRtdb();
+async function tryAutoResumeWhatsAppSafely(): Promise<void> {
+  if (
+    isShuttingDown ||
+    explicitUnlinkRequested ||
+    waConnectLock ||
+    waSocket ||
+    waState.status !== 'disconnected'
+  ) {
     return;
   }
   const recentlyReplaced =
     connectionReplacedAtMs > 0 && Date.now() - connectionReplacedAtMs < 90_000;
-  if (
-    waState.status === 'disconnected' &&
-    !waSocket &&
-    !waConnectLock &&
-    hasSavedWhatsAppCreds() &&
-    !isShuttingDown &&
-    !explicitUnlinkRequested &&
-    !recentlyReplaced &&
-    !isRemoteCloudWorkerActive()
-  ) {
-    void startWhatsAppConnection();
+  if (recentlyReplaced) return;
+
+  await refreshRemoteWaRuntimeFromRtdb();
+  if (isRemoteCloudWorkerActive()) {
+    return;
   }
-}, 15_000).unref();
+
+  const hasAuthReady = await restoreWaAuthVaultFromRtdbIfNeeded();
+  if (!hasAuthReady || isShuttingDown || explicitUnlinkRequested) {
+    return;
+  }
+
+  // Re-check right before opening socket so two servers booting together never collide
+  await refreshRemoteWaRuntimeFromRtdb();
+  if (!isRemoteCloudWorkerActive()) {
+    await startWhatsAppConnection();
+  }
+}
+
+// Publish WhatsApp 24x7 heartbeat every 14s when locally connected,
+// drain any pending relay jobs, and auto-resume encrypted Cloud Vault credentials if no remote worker is active.
+setInterval(
+  () => {
+    if (waState.status === 'connected' && waSocket) {
+      void publishLocalWaRuntimeStatusToRtdb();
+      void drainPendingWaDispatchQueueFromRtdb();
+      return;
+    }
+    void tryAutoResumeWhatsAppSafely();
+  },
+  isProduction ? 12_000 : 18_000
+).unref();
 
 async function waitForActiveWaSocket(maxWaitMs = 8000): Promise<WASocket> {
   const deadline = Date.now() + maxWaitMs;
@@ -3595,17 +3998,13 @@ function getEnvAdminPasscode(): string {
 async function startServer(): Promise<void> {
   initServerRealtimeDbSync();
 
-  // Auto-resume saved WhatsApp credentials after checking whether a remote 24x7 worker is already live
-  setTimeout(() => {
-    if (
-      hasSavedWhatsAppCreds() &&
-      !isShuttingDown &&
-      !explicitUnlinkRequested &&
-      !isRemoteCloudWorkerActive()
-    ) {
-      void startWhatsAppConnection();
-    }
-  }, 2500).unref();
+  // Auto-resume saved/cloud-encrypted WhatsApp session (Production/Railway gets priority at 2.5s; Dev waits 6.5s so Railway leads 24x7)
+  setTimeout(
+    () => {
+      void tryAutoResumeWhatsAppSafely();
+    },
+    isProduction ? 2500 : 6500
+  ).unref();
 
   const app = express();
   app.disable('x-powered-by');
@@ -4304,12 +4703,58 @@ async function startServer(): Promise<void> {
   app.post('/api/whatsapp/connect', requireAdminAuth, async (req: Request, res: Response) => {
     const pairingPhone =
       typeof req.body?.pairingPhone === 'string' ? req.body.pairingPhone.trim() : '';
+    if (!pairingPhone) {
+      await refreshRemoteWaRuntimeFromRtdb();
+      if (isRemoteCloudWorkerActive()) {
+        // Remote 24x7 server is already connected—do not steal or disrupt its socket!
+        res.json({
+          ok: true,
+          cloudWorkerConnected: true,
+          cloudConnectedNumber: remoteWaRuntime?.connectedNumber ?? null,
+        });
+        return;
+      }
+    }
+
+    // Wait briefly if an earlier socket setup is finishing its lock
+    const lockWaitDeadline = Date.now() + 2500;
+    while (waConnectLock && Date.now() < lockWaitDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
     void startWhatsAppConnection(pairingPhone);
-    res.json({ ok: true });
+
+    // Wait up to 6s so QR or 8-char Pairing Code is returned immediately in this response
+    const readyDeadline = Date.now() + 6000;
+    while (Date.now() < readyDeadline) {
+      if (
+        waState.status === 'connected' ||
+        (pairingPhone && Boolean(waState.pairingCode)) ||
+        (!pairingPhone && Boolean(waState.qrDataUrl)) ||
+        Boolean(waState.lastError)
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+
+    res.json({
+      ok: true,
+      status: waState.status,
+      qrDataUrl: waState.qrDataUrl,
+      pairingCode: waState.pairingCode,
+      connectedNumber: waState.connectedNumber,
+      lastError: waState.lastError,
+    });
   });
 
   app.post('/api/whatsapp/disconnect', requireAdminAuth, async (_req: Request, res: Response) => {
     explicitUnlinkRequested = true;
+    localWaVaultSyncedAt = 0;
+    if (waVaultPushTimer) {
+      clearTimeout(waVaultPushTimer);
+      waVaultPushTimer = null;
+    }
     if (waReconnectTimer) {
       clearTimeout(waReconnectTimer);
       waReconnectTimer = null;
@@ -4333,8 +4778,11 @@ async function startServer(): Promise<void> {
     waState.pairingCode = null;
     waState.connectedNumber = null;
     waState.lastError = null;
-    if (rtdbInstance && remoteWaRuntime?.instanceId === SERVER_INSTANCE_ID) {
-      void remove(ref(rtdbInstance, 'meta/waRuntimeStatus')).catch(() => {});
+    if (rtdbInstance) {
+      void remove(ref(rtdbInstance, 'meta/waAuthVault')).catch(() => {});
+      if (remoteWaRuntime?.instanceId === SERVER_INSTANCE_ID) {
+        void remove(ref(rtdbInstance, 'meta/waRuntimeStatus')).catch(() => {});
+      }
     }
     res.json({ ok: true });
   });
@@ -4971,17 +5419,22 @@ async function startServer(): Promise<void> {
     if (isShuttingDown) return;
     isShuttingDown = true;
     const wasConnectedHere = waState.status === 'connected';
+    if (waVaultPushTimer) {
+      clearTimeout(waVaultPushTimer);
+      waVaultPushTimer = null;
+    }
     backupWhatsAppCredsSafe();
     cleanupActiveSocketOnly();
     void (async () => {
       if (rtdbInstance && wasConnectedHere) {
+        await pushWaAuthVaultToRtdbImmediate().catch(() => {});
         await remove(ref(rtdbInstance, 'meta/waRuntimeStatus')).catch(() => {});
       }
       httpServer.close(() => {
         process.exit(0);
       });
     })();
-    setTimeout(() => process.exit(0), 3000).unref();
+    setTimeout(() => process.exit(0), 3500).unref();
   };
 
   process.on('SIGTERM', handleGracefulShutdown);
