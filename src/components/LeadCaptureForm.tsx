@@ -30,12 +30,24 @@ interface LeadCaptureFormProps {
   submittedLeadId: string | null;
   whatsappSentAuto: boolean;
   whatsappDirectUrl: string | null;
+  showcaseImageSrc?: string | null;
+  showcaseHidden?: boolean;
   onFieldChange: <K extends keyof LeadFormInput>(field: K, value: LeadFormInput[K]) => void;
   onSubmit: (e: React.FormEvent) => void;
   onStartNewLead: () => void;
 }
 
 const LOGO_SRC = '/src/assets/images/prestier_logo_emblem_1795501498338.jpg';
+
+function isSafeShowcaseImageSrc(raw: string | null | undefined): raw is string {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  if (/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=\s]+$/.test(trimmed)) {
+    return true;
+  }
+  return /^\/[A-Za-z0-9._/-]+$/.test(trimmed) && !trimmed.startsWith('//');
+}
 
 export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
   form,
@@ -44,12 +56,22 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
   lastSavedTime,
   isSubmitting,
   submittedLeadId,
+  showcaseImageSrc,
+  showcaseHidden = false,
   onFieldChange,
   onSubmit,
   onStartNewLead,
 }) => {
   const [logoFailed, setLogoFailed] = React.useState(false);
-  const [failedReplyImages, setFailedReplyImages] = React.useState<Record<string, boolean>>({});
+  const [showcaseImgFailed, setShowcaseImgFailed] = React.useState(false);
+
+  const effectiveShowcaseSrc = isSafeShowcaseImageSrc(showcaseImageSrc)
+    ? showcaseImageSrc
+    : PRESTAIR_REPLY_IMAGES[0];
+
+  useEffect(() => {
+    setShowcaseImgFailed(false);
+  }, [effectiveShowcaseSrc, showcaseHidden]);
 
   const isThankYouPopupOpen = syncState === 'confirmed' && Boolean(submittedLeadId);
 
@@ -487,36 +509,44 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
                   </h2>
                 </div>
 
-                <div className="mt-8 pt-8 border-t border-slate-200 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
-                  <div className="lg:col-span-6">
-                    {PRESTAIR_REPLY_IMAGES.map((src) =>
-                      !failedReplyImages[src] ? (
-                        <div
-                          key={src}
-                          className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 aspect-[4/3] max-h-[60vh]"
-                        >
+                <div
+                  className={`mt-8 pt-8 border-t border-slate-200 grid grid-cols-1 gap-8 items-center ${
+                    showcaseHidden ? 'max-w-3xl' : 'lg:grid-cols-12'
+                  }`}
+                >
+                  {!showcaseHidden && (
+                    <div className="lg:col-span-6">
+                      {!showcaseImgFailed ? (
+                        <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 aspect-[4/3] max-h-[60vh]">
                           <img
-                            src={src}
-                            alt="Prestair Bakery Solutions Showcase"
+                            src={effectiveShowcaseSrc}
+                            alt="Prestair System LLP Food Service Equipments Showcase"
                             referrerPolicy="no-referrer"
-                            onError={() =>
-                              setFailedReplyImages((prev) => ({ ...prev, [src]: true }))
-                            }
+                            onError={() => setShowcaseImgFailed(true)}
                             className="h-full w-full object-cover"
                           />
                         </div>
                       ) : (
-                        <div
-                          key={src}
-                          className="rounded-xl border border-slate-200 bg-slate-50 aspect-[4/3] flex items-center justify-center p-6 text-center text-xs font-medium text-slate-500"
-                        >
-                          Prestair Bakery Solutions Showcase
+                        <div className="rounded-xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-800 to-sky-950 aspect-[4/3] flex flex-col items-center justify-center p-8 text-center space-y-2">
+                          <p className="font-display text-xs font-extrabold text-amber-400 underline decoration-amber-400/70 underline-offset-4">
+                            Food Service Equipments
+                          </p>
+                          <p className="font-display text-xl sm:text-2xl font-bold text-white tracking-tight">
+                            Prestair System LLP
+                          </p>
+                          <p className="text-xs text-slate-300 max-w-xs">
+                            Display Cabinets · Electronic Shelf Labels · Degree-In Equipment
+                          </p>
                         </div>
-                      )
-                    )}
-                  </div>
+                      )}
+                    </div>
+                  )}
 
-                  <div className="lg:col-span-6 flex flex-col justify-between space-y-6">
+                  <div
+                    className={`${
+                      showcaseHidden ? '' : 'lg:col-span-6'
+                    } flex flex-col justify-between space-y-6`}
+                  >
                     <div className="text-sm sm:text-base text-slate-800 whitespace-pre-line leading-relaxed">
                       {DEFAULT_PRESTAIR_WHATSAPP_REPLY}
                     </div>

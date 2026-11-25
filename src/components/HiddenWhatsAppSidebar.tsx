@@ -562,9 +562,13 @@ const ReplyImageEditorSection: React.FC<ReplyImageEditorSectionProps> = ({
 
 interface HiddenWhatsAppSidebarProps {
   adminToken: string | null;
+  onOpenShowcaseTab?: () => void;
 }
 
-export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({ adminToken }) => {
+export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({
+  adminToken,
+  onOpenShowcaseTab,
+}) => {
   const [waStatus, setWaStatus] = useState<WhatsAppStatusPayload | null>(null);
   const [isLoadingWa, setIsLoadingWa] = useState(false);
   const [pairingPhone, setPairingPhone] = useState('');
@@ -1112,6 +1116,22 @@ export const HiddenWhatsAppSidebar: React.FC<HiddenWhatsAppSidebarProps> = ({ ad
             <p className="text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
               {settingsFeedback}
             </p>
+          )}
+
+          {onOpenShowcaseTab && (
+            <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-slate-600">
+                Want to choose which image appears on the website Thank You Showcase?
+              </p>
+              <button
+                type="button"
+                onClick={onOpenShowcaseTab}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-sky-800 text-xs font-semibold px-3 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <ImagePlus className="h-3.5 w-3.5" />
+                <span>Select Showcase Image →</span>
+              </button>
+            </div>
           )}
 
           <button

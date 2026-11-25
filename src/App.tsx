@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FileSpreadsheet,
+  Image as ImageIcon,
   Loader2,
   Lock,
   MessageCircle,
@@ -47,6 +48,7 @@ import {
 } from './components/LiveGoogleSheetTable';
 import { HiddenWhatsAppSidebar } from './components/HiddenWhatsAppSidebar';
 import { GoogleSheetAppsScriptPanel } from './components/GoogleSheetAppsScriptPanel';
+import { ShowcaseAdminPanel } from './components/ShowcaseAdminPanel';
 
 const FACTORY_BG_SRC =
   '/src/assets/images/stainless_steel_equipment_factory_1795544754673.jpg';
@@ -92,15 +94,33 @@ export default function App() {
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [sheetSuccessMsg, setSheetSuccessMsg] = useState<string | null>(null);
 
+  // Customer Thank-You Showcase Image State
+  const [showcaseImageSrc, setShowcaseImageSrc] = useState<string | null>(null);
+  const [showcaseHidden, setShowcaseHidden] = useState(false);
+
   // Admin Workspace & Password Gate State (in-memory session only, never persisted to localStorage)
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
-  const [adminTab, setAdminTab] = useState<'leads' | 'sheets' | 'whatsapp'>('leads');
+  const [adminTab, setAdminTab] = useState<'leads' | 'sheets' | 'whatsapp' | 'showcase'>('leads');
   const [isPasscodeConfigured, setIsPasscodeConfigured] = useState<boolean | null>(null);
   const [isCheckingAuthStatus, setIsCheckingAuthStatus] = useState(false);
   const [adminPasscodeInput, setAdminPasscodeInput] = useState('');
   const [isUnlockingAdmin, setIsUnlockingAdmin] = useState(false);
   const [adminAuthError, setAdminAuthError] = useState<string | null>(null);
+
+  const refreshPublicShowcase = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/public/showcase?t=${Date.now()}`, {
+        cache: 'no-store',
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setShowcaseHidden(data.source === 'none');
+      setShowcaseImageSrc(typeof data.imageSrc === 'string' ? data.imageSrc : null);
+    } catch {
+      // ignore transient network error
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -108,7 +128,8 @@ export default function App() {
     } catch {
       // ignore storage restriction
     }
-  }, []);
+    void refreshPublicShowcase();
+  }, [refreshPublicShowcase]);
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectedSheetRef = useRef<ConnectedSpreadsheet | null>(null);
@@ -600,6 +621,7 @@ export default function App() {
     setErrors({});
     setIsSubmitting(true);
     try {
+      void refreshPublicShowcase();
       const result = await persistLeadRealTime(
         activeLeadId,
         sessionToken,
@@ -955,6 +977,8 @@ export default function App() {
           submittedLeadId={submittedLeadId}
           whatsappSentAuto={whatsappSentAuto}
           whatsappDirectUrl={whatsappDirectUrl}
+          showcaseImageSrc={showcaseImageSrc}
+          showcaseHidden={showcaseHidden}
           onFieldChange={handleFieldChange}
           onSubmit={handleSubmit}
           onStartNewLead={handleStartNewLead}
@@ -1109,7 +1133,7 @@ export default function App() {
                   <div
                     role="tablist"
                     aria-label="Admin workspace sections"
-                    className="grid grid-cols-3 sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200 w-full sm:w-auto"
+                    className="grid grid-cols-2 sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200 w-full sm:w-auto"
                   >
                     <button
                       type="button"
@@ -1152,6 +1176,20 @@ export default function App() {
                     >
                       <MessageCircle className="hidden sm:block h-3.5 w-3.5 text-emerald-700 shrink-0" />
                       <span>WhatsApp</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={adminTab === 'showcase'}
+                      onClick={() => setAdminTab('showcase')}
+                      className={`min-h-10 inline-flex items-center justify-center gap-1.5 px-2 sm:px-3.5 py-2 sm:py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        adminTab === 'showcase'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <ImageIcon className="hidden sm:block h-3.5 w-3.5 text-sky-700 shrink-0" />
+                      <span>Showcase</span>
                     </button>
                   </div>
 
@@ -1198,8 +1236,19 @@ export default function App() {
                     adminToken={adminToken}
                     onSyncComplete={() => void fetchInitialLeads(adminToken)}
                   />
+                ) : adminTab === 'whatsapp' ? (
+                  <HiddenWhatsAppSidebar
+                    adminToken={adminToken}
+                    onOpenShowcaseTab={() => setAdminTab('showcase')}
+                  />
                 ) : (
-                  <HiddenWhatsAppSidebar adminToken={adminToken} />
+                  <ShowcaseAdminPanel
+                    adminToken={adminToken}
+                    onShowcaseChanged={({ source, imageSrc }) => {
+                      setShowcaseHidden(source === 'none');
+                      setShowcaseImageSrc(imageSrc);
+                    }}
+                  />
                 )}
               </div>
             </div>

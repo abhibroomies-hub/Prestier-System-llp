@@ -66,6 +66,7 @@ const ADMIN_SESSIONS_FILE = path.join(DATA_DIR, 'admin-sessions.json');
 const WA_SETTINGS_FILE = path.join(DATA_DIR, 'whatsapp-settings.json');
 const WA_REPLY_IMAGE_FILE = path.join(DATA_DIR, 'whatsapp-reply-image.json');
 const WA_REPLY_IMAGE_2_FILE = path.join(DATA_DIR, 'whatsapp-reply-image-2.json');
+const SHOWCASE_SETTINGS_FILE = path.join(DATA_DIR, 'showcase-settings.json');
 const SHEET_SYNC_FILE = path.join(DATA_DIR, 'sheet-sync-settings.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -416,6 +417,85 @@ function getReplyImageStatusPayload(imgState: WhatsAppReplyImageState = waReplyI
         ? `data:${imgState.mimeType};base64,${imgState.base64Data}`
         : null,
     updatedAt: imgState.updatedAt,
+  };
+}
+
+// 4b. Customer Thank-You Popup Showcase Image Settings (synced across AI Studio & Railway)
+type ShowcaseImageSource = 'wa1' | 'wa2' | 'custom' | 'none';
+
+interface ShowcaseSettingsState {
+  source: ShowcaseImageSource;
+  mimeType: string;
+  base64Data: string;
+  updatedAt: number;
+}
+
+function isValidShowcaseSource(val: unknown): val is ShowcaseImageSource {
+  return val === 'wa1' || val === 'wa2' || val === 'custom' || val === 'none';
+}
+
+function loadShowcaseSettingsFromDisk(): ShowcaseSettingsState {
+  const raw = readJsonFileSafe<Partial<ShowcaseSettingsState>>(SHOWCASE_SETTINGS_FILE, {});
+  const source: ShowcaseImageSource = isValidShowcaseSource(raw.source) ? raw.source : 'wa1';
+  let mimeType = '';
+  let base64Data = '';
+  if (typeof raw.mimeType === 'string' && typeof raw.base64Data === 'string' && raw.base64Data) {
+    const buf = Buffer.from(raw.base64Data, 'base64');
+    if (validateImageBinaryMagic(raw.mimeType, buf)) {
+      mimeType = raw.mimeType;
+      base64Data = raw.base64Data;
+    }
+  }
+  return {
+    source: source === 'custom' && !base64Data ? 'wa1' : source,
+    mimeType,
+    base64Data,
+    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+  };
+}
+
+let showcaseSettings: ShowcaseSettingsState = loadShowcaseSettingsFromDisk();
+
+function persistShowcaseSettingsLocal(): void {
+  writeJsonFileSafe(SHOWCASE_SETTINGS_FILE, showcaseSettings);
+}
+
+function getShowcaseStatusPayload() {
+  const wa1DataUrl =
+    waReplyImage.mode === 'custom' && waReplyImage.mimeType && waReplyImage.base64Data
+      ? `data:${waReplyImage.mimeType};base64,${waReplyImage.base64Data}`
+      : null;
+  const wa2DataUrl =
+    waReplyImage2.mode === 'custom' && waReplyImage2.mimeType && waReplyImage2.base64Data
+      ? `data:${waReplyImage2.mimeType};base64,${waReplyImage2.base64Data}`
+      : null;
+  const customDataUrl =
+    showcaseSettings.mimeType && showcaseSettings.base64Data
+      ? `data:${showcaseSettings.mimeType};base64,${showcaseSettings.base64Data}`
+      : null;
+
+  let activeImageSrc: string | null = null;
+  if (showcaseSettings.source === 'none') {
+    activeImageSrc = null;
+  } else if (showcaseSettings.source === 'custom') {
+    activeImageSrc = customDataUrl || wa1DataUrl || wa2DataUrl || PRESTAIR_REPLY_IMAGES[0];
+  } else if (showcaseSettings.source === 'wa2') {
+    activeImageSrc = wa2DataUrl || wa1DataUrl || customDataUrl || PRESTAIR_SECOND_REPLY_IMAGES[0];
+  } else {
+    activeImageSrc = wa1DataUrl || wa2DataUrl || customDataUrl || PRESTAIR_REPLY_IMAGES[0];
+  }
+
+  return {
+    source: showcaseSettings.source,
+    activeImageSrc,
+    customDataUrl,
+    wa1DataUrl,
+    wa2DataUrl,
+    updatedAt: Math.max(
+      showcaseSettings.updatedAt,
+      waReplyImage.updatedAt,
+      waReplyImage2.updatedAt
+    ),
   };
 }
 
@@ -922,6 +1002,15 @@ async function pushWaReplyImage2ToRtdb(): Promise<void> {
   }
 }
 
+async function pushShowcaseSettingsToRtdb(): Promise<void> {
+  if (!rtdbInstance) return;
+  try {
+    await set(ref(rtdbInstance, 'meta/showcaseSettings'), showcaseSettings);
+  } catch {
+    // ignore
+  }
+}
+
 async function pushSheetSyncMetaToRtdb(): Promise<void> {
   if (!rtdbInstance) return;
   try {
@@ -1333,6 +1422,43 @@ function initServerRealtimeDbSync(): void {
       }
     });
 
+    // 5d. Sync Customer Thank-You Showcase Image Settings across all deployments
+    onValue(ref(rtdbInstance, 'meta/showcaseSettings'), (snap) => {
+      const val = snap.val() as Partial<ShowcaseSettingsState> | null;
+      if (val && typeof val === 'object') {
+        const remoteUpdatedAt = typeof val.updatedAt === 'number' ? val.updatedAt : 1;
+        if (remoteUpdatedAt > showcaseSettings.updatedAt) {
+          const remoteSource: ShowcaseImageSource = isValidShowcaseSource(val.source)
+            ? val.source
+            : 'wa1';
+          let mimeType = '';
+          let base64Data = '';
+          if (
+            typeof val.mimeType === 'string' &&
+            typeof val.base64Data === 'string' &&
+            val.base64Data
+          ) {
+            const buf = Buffer.from(val.base64Data, 'base64');
+            if (validateImageBinaryMagic(val.mimeType, buf)) {
+              mimeType = val.mimeType;
+              base64Data = val.base64Data;
+            }
+          }
+          showcaseSettings = {
+            source: remoteSource === 'custom' && !base64Data ? 'wa1' : remoteSource,
+            mimeType,
+            base64Data,
+            updatedAt: remoteUpdatedAt,
+          };
+          persistShowcaseSettingsLocal();
+        } else if (showcaseSettings.updatedAt > remoteUpdatedAt) {
+          void pushShowcaseSettingsToRtdb();
+        }
+      } else if (showcaseSettings.updatedAt > 0) {
+        void pushShowcaseSettingsToRtdb();
+      }
+    });
+
     // 6. Sync Google Sheet Apps Script Configuration across all deployments
     onValue(ref(rtdbInstance, 'meta/sheetSync'), (snap) => {
       const val = snap.val() as Partial<SheetSyncSettings> | null;
@@ -1713,6 +1839,36 @@ async function ensureWaMetaHydratedFromRtdb(): Promise<void> {
           };
           persistWaReplyImage2Local();
         }
+      }
+    }
+
+    if (showcaseSettings.updatedAt === 0) {
+      const snapShow = await get(ref(rtdbInstance, 'meta/showcaseSettings'));
+      const valShow = snapShow.val() as Partial<ShowcaseSettingsState> | null;
+      if (valShow && typeof valShow === 'object') {
+        const remoteSource: ShowcaseImageSource = isValidShowcaseSource(valShow.source)
+          ? valShow.source
+          : 'wa1';
+        let mimeType = '';
+        let base64Data = '';
+        if (
+          typeof valShow.mimeType === 'string' &&
+          typeof valShow.base64Data === 'string' &&
+          valShow.base64Data
+        ) {
+          const buf = Buffer.from(valShow.base64Data, 'base64');
+          if (validateImageBinaryMagic(valShow.mimeType, buf)) {
+            mimeType = valShow.mimeType;
+            base64Data = valShow.base64Data;
+          }
+        }
+        showcaseSettings = {
+          source: remoteSource === 'custom' && !base64Data ? 'wa1' : remoteSource,
+          mimeType,
+          base64Data,
+          updatedAt: typeof valShow.updatedAt === 'number' ? valShow.updatedAt : 1,
+        };
+        persistShowcaseSettingsLocal();
       }
     }
   } catch {
@@ -3063,6 +3219,70 @@ async function startServer(): Promise<void> {
       });
     }
   );
+
+  // --------------------------------------------------------------------------
+  // Customer Thank-You Showcase Image Endpoints (Public Display + Admin Control)
+  // --------------------------------------------------------------------------
+  app.get('/api/public/showcase', async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    await ensureWaMetaHydratedFromRtdb();
+    const status = getShowcaseStatusPayload();
+    res.json({
+      source: status.source,
+      imageSrc: status.activeImageSrc,
+      updatedAt: status.updatedAt,
+    });
+  });
+
+  app.get('/api/showcase/status', requireAdminAuth, async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    await ensureWaMetaHydratedFromRtdb();
+    res.json(getShowcaseStatusPayload());
+  });
+
+  app.post('/api/showcase/settings', requireAdminAuth, async (req: Request, res: Response) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+      string,
+      unknown
+    >;
+    const rawSource = body.source;
+    if (!isValidShowcaseSource(rawSource)) {
+      res.status(400).json({ error: 'Invalid showcase image option.' });
+      return;
+    }
+
+    let nextMime = showcaseSettings.mimeType;
+    let nextBase64 = showcaseSettings.base64Data;
+
+    if (typeof body.dataUrl === 'string' && body.dataUrl.trim()) {
+      const validated = parseAndValidateReplyImageDataUrl(body.dataUrl);
+      if (!validated.valid) {
+        res.status(400).json({ error: validated.error });
+        return;
+      }
+      nextMime = validated.mimeType;
+      nextBase64 = validated.base64Data;
+    } else if (rawSource === 'custom' && !nextBase64) {
+      res.status(400).json({
+        error: 'Please upload a custom image first to use Custom Showcase Image.',
+      });
+      return;
+    }
+
+    showcaseSettings = {
+      source: rawSource,
+      mimeType: nextMime,
+      base64Data: nextBase64,
+      updatedAt: Date.now(),
+    };
+    persistShowcaseSettingsLocal();
+    await pushShowcaseSettingsToRtdb();
+
+    res.json({
+      ok: true,
+      ...getShowcaseStatusPayload(),
+    });
+  });
 
   // --------------------------------------------------------------------------
   // Frontend Serving: Production Static Assets (Railway / Cloud Run) vs Vite Dev
