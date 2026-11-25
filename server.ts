@@ -3081,18 +3081,18 @@ async function ensureAdminAuthHydratedFromRtdb(): Promise<void> {
 
 function getCandidateWaVaultKeys(): Buffer[] {
   const keys: Buffer[] = [];
-  const customSecret = (process.env.WA_SESSION_SECRET || '').trim();
-  if (customSecret) {
-    keys.push(crypto.scryptSync(customSecret, 'prestier-wa-vault-v1', 32));
+  if (adminAuth?.passwordHash && adminAuth?.salt) {
+    keys.push(
+      crypto.scryptSync(adminAuth.passwordHash, `${adminAuth.salt}:prestier-wa-vault-v1`, 32)
+    );
   }
   const envPass = (process.env.ADMIN_PASSCODE || '').trim();
   if (envPass) {
     keys.push(crypto.scryptSync(envPass, 'prestier-wa-vault-pass-v1', 32));
   }
-  if (adminAuth?.passwordHash && adminAuth?.salt) {
-    keys.push(
-      crypto.scryptSync(adminAuth.passwordHash, `${adminAuth.salt}:prestier-wa-vault-v1`, 32)
-    );
+  const customSecret = (process.env.WA_SESSION_SECRET || '').trim();
+  if (customSecret) {
+    keys.push(crypto.scryptSync(customSecret, 'prestier-wa-vault-v1', 32));
   }
   keys.push(
     crypto.scryptSync(RTDB_DATABASE_URL || 'prestier-final', 'prestier-wa-vault-boot-v1', 32)
