@@ -588,6 +588,9 @@ export default function App() {
     const validation = validateLeadForSubmit(sanitized);
     if (!validation.valid) {
       setErrors(validation.errors);
+      if (validation.errors.phone && typeof document !== 'undefined') {
+        document.getElementById('lead-phone')?.focus();
+      }
       if (hasAnyLeadContent(sanitized)) {
         void persistLeadRealTime(activeLeadId, sessionToken, sanitized, 'partial');
       }

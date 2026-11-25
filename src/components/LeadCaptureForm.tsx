@@ -112,12 +112,12 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
                 PS
               </div>
             )}
-            <div className="min-w-0">
-              <p className="text-xs font-bold text-sky-700 tracking-normal">
-                Food service equipment
+            <div className="min-w-0 space-y-1">
+              <p className="font-display text-sm sm:text-base font-extrabold text-sky-800 tracking-tight underline decoration-amber-500 decoration-2 underline-offset-4">
+                Food Service Equipments
               </p>
-              <h1 className="font-display text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-                Prestier System LLP
+              <h1 className="font-display text-xl sm:text-2xl font-bold text-slate-900 tracking-tight pt-0.5">
+                Prestair System LLP
               </h1>
             </div>
           </div>
@@ -148,12 +148,12 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
               </>
             )}
             {syncState === 'idle' && (
-              <span>Food service &amp; bakery solutions inquiry · Instant WhatsApp confirmation</span>
+              <span>Food service &amp; bakery solutions inquiry</span>
             )}
           </div>
         </div>
 
-        {/* Main Customer Form (All fields optional) */}
+        {/* Main Customer Form (Phone Number compulsory) */}
         <form onSubmit={onSubmit} noValidate className="mt-6 space-y-4">
           {/* 1. Full Name */}
           <div>
@@ -201,13 +201,17 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
             </div>
           </div>
 
-          {/* 3. Phone / WhatsApp Number */}
+          {/* 3. Phone / WhatsApp Number (Compulsory) */}
           <div>
             <label
               htmlFor="lead-phone"
               className="block text-sm font-semibold text-slate-900 mb-1.5"
             >
-              3. Phone / WhatsApp Number
+              3. Phone / WhatsApp Number{' '}
+              <span className="text-rose-600 font-bold" aria-hidden="true">
+                *
+              </span>
+              <span className="ml-1.5 text-xs font-semibold text-rose-700">(Required)</span>
             </label>
             <div className="relative">
               <Phone className="h-4 w-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -215,13 +219,26 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
                 id="lead-phone"
                 name="phone"
                 type="tel"
+                required
+                aria-required="true"
+                aria-invalid={Boolean(errors.phone)}
+                aria-describedby={errors.phone ? 'lead-phone-error' : undefined}
                 autoComplete="tel"
-                placeholder="Enter 10-digit WhatsApp mobile number"
+                placeholder="Enter 10-digit WhatsApp mobile number (Compulsory)"
                 value={form.phone}
                 onChange={(e) => onFieldChange('phone', e.target.value)}
                 className={getGlassInputClass(Boolean(errors.phone), 'tabular-nums')}
               />
             </div>
+            {errors.phone && (
+              <p
+                id="lead-phone-error"
+                role="alert"
+                className="mt-1.5 text-xs font-semibold text-rose-700"
+              >
+                {errors.phone}
+              </p>
+            )}
           </div>
 
           {/* 4. Company / Store Name */}
@@ -413,11 +430,11 @@ export const LeadCaptureForm: React.FC<LeadCaptureFormProps> = ({
                     </div>
                   )}
                   <div className="min-w-0">
-                    <p className="text-xs font-semibold text-sky-700 truncate">
-                      Food service equipment
+                    <p className="font-display text-xs sm:text-sm font-extrabold text-sky-800 underline decoration-amber-500 decoration-2 underline-offset-2 truncate">
+                      Food Service Equipments
                     </p>
-                    <p className="font-display text-base sm:text-lg font-bold text-slate-900 tracking-tight truncate">
-                      Prestier System LLP
+                    <p className="font-display text-base sm:text-lg font-bold text-slate-900 tracking-tight truncate pt-0.5">
+                      Prestair System LLP
                     </p>
                   </div>
                 </div>

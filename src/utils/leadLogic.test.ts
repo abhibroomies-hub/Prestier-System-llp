@@ -59,9 +59,9 @@ test('hasAnyLeadContent detects partial keystroke drafts', () => {
   );
 });
 
-test('validateLeadForSubmit allows optional fields with nothing compulsory', () => {
-  const result = validateLeadForSubmit({
-    name: '',
+test('validateLeadForSubmit enforces compulsory valid phone number', () => {
+  const emptyResult = validateLeadForSubmit({
+    name: 'Rajesh',
     designation: '',
     phone: '',
     companyName: '',
@@ -70,7 +70,32 @@ test('validateLeadForSubmit allows optional fields with nothing compulsory', () 
     outletsCount: '',
     productInterest: [],
   });
-  assert.equal(result.valid, true);
+  assert.equal(emptyResult.valid, false);
+  assert.ok(Boolean(emptyResult.errors.phone));
+
+  const shortResult = validateLeadForSubmit({
+    name: 'Rajesh',
+    designation: '',
+    phone: '+91 98765',
+    companyName: '',
+    city: '',
+    emailAddress: '',
+    outletsCount: '',
+    productInterest: [],
+  });
+  assert.equal(shortResult.valid, false);
+
+  const validResult = validateLeadForSubmit({
+    name: '',
+    designation: '',
+    phone: '+91 98765 43210',
+    companyName: '',
+    city: '',
+    emailAddress: '',
+    outletsCount: '',
+    productInterest: [],
+  });
+  assert.equal(validResult.valid, true);
 });
 
 test('normalizePhoneForWhatsApp handles 10-digit Indian and international numbers', () => {

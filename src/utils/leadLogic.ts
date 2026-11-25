@@ -38,8 +38,24 @@ export const DEFAULT_PRESTAIR_WHATSAPP_REPLY = [
   'Team Prestair',
 ].join('\n');
 
+export const DEFAULT_PRESTAIR_SECOND_WHATSAPP_REPLY = [
+  '✨ *Prestair System LLP — Food Service Equipments*',
+  '',
+  '• *Display Cabinet* — Refrigerated & dry bakery showcases',
+  '• *Electronic Shelf Label* — Smart wireless digital retail pricing',
+  '• *Degree-In Equipment* — Precision temperature-controlled commercial units',
+  '',
+  'Share your store layout or equipment requirements here on WhatsApp and our team will assist you right away.',
+  '',
+  'Team Prestair',
+].join('\n');
+
 export const PRESTAIR_REPLY_IMAGES = [
   '/assets/aistudio/image_667a0296.png',
+] as const;
+
+export const PRESTAIR_SECOND_REPLY_IMAGES = [
+  '/assets/aistudio/image_88f025f4.png',
 ] as const;
 
 export const PRODUCT_OPTIONS: ReadonlyArray<{
@@ -196,10 +212,26 @@ export interface ValidationResult {
   errors: Partial<Record<keyof LeadFormInput, string>>;
 }
 
-export function validateLeadForSubmit(_input: LeadFormInput): ValidationResult {
+export function validateLeadForSubmit(input: LeadFormInput): ValidationResult {
+  const errors: Partial<Record<keyof LeadFormInput, string>> = {};
+  const rawDigits = (input.phone || '').replace(/\D/g, '');
+  const effectiveDigits = rawDigits === '91' ? '' : rawDigits;
+  const localDigits =
+    effectiveDigits.length === 12 && effectiveDigits.startsWith('91')
+      ? effectiveDigits.slice(2)
+      : effectiveDigits.length === 11 && effectiveDigits.startsWith('0')
+        ? effectiveDigits.slice(1)
+        : effectiveDigits;
+
+  if (!localDigits) {
+    errors.phone = 'Phone / WhatsApp number is required.';
+  } else if (localDigits.length < 10 || effectiveDigits.length > 15) {
+    errors.phone = 'Please enter a valid 10-digit Phone / WhatsApp number.';
+  }
+
   return {
-    valid: true,
-    errors: {},
+    valid: Object.keys(errors).length === 0,
+    errors,
   };
 }
 
